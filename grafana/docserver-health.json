@@ -1,0 +1,341 @@
+{
+  "dashboard": "opencloud-docserver",
+  "title": "World Office — Docserver Health",
+  "uid": "opencloud-docserver",
+  "description": "Health dashboard for the opencloud-docserver (FastAPI + WOPI). Defines the target metric contract for the docserver Prometheus /metrics endpoint; every opencloud_docserver_* series is expected to be exposed once the docserver is instrumented (see plan/operations-runbook.md).",
+  "version": 2,
+  "schemaVersion": 39,
+  "tags": ["world-office", "docserver", "fastapi", "wopi"],
+  "timezone": "browser",
+  "editable": true,
+  "refresh": "30s",
+  "panels": [
+    {
+      "title": "Docserver Health",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
+      "id": 1,
+      "datasource": null,
+      "targets": [
+        {
+          "expr": "up{job=~\"$job\"}",
+          "legendFormat": "{{instance}}",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "values": false },
+        "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "mappings": [
+            { "type": "value", "value": "1", "text": "UP", "color": "green" },
+            { "type": "value", "value": "0", "text": "DOWN", "color": "red" }
+          ],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "red" }, { "value": 1, "color": "green" }] }
+        }
+      }
+    },
+    {
+      "title": "Documents Stored",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
+      "id": 2,
+      "datasource": null,
+      "targets": [
+        {
+          "expr": "sum(opencloud_docserver_documents_total{job=~\"$job\"})",
+          "legendFormat": "Documents",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "values": false },
+        "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green" }, { "value": 100, "color": "yellow" }, { "value": 250, "color": "red" }] }
+        }
+      }
+    },
+    {
+      "title": "Active Sessions",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
+      "id": 3,
+      "datasource": null,
+      "targets": [
+        {
+          "expr": "sum(opencloud_docserver_sessions_active{job=~\"$job\"})",
+          "legendFormat": "Active",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "values": false },
+        "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green" }, { "value": 10, "color": "yellow" }, { "value": 50, "color": "red" }] }
+        }
+      }
+    },
+    {
+      "title": "WOPI 5xx Rate",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
+      "id": 4,
+      "datasource": null,
+      "targets": [
+        {
+          "expr": "sum(rate(opencloud_docserver_wopi_requests_total{job=~\"$job\",status=~\"5..\"}[5m]))",
+          "legendFormat": "5xx/s",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "values": false },
+        "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green" }, { "value": 0.1, "color": "yellow" }, { "value": 1, "color": "red" }] }
+        }
+      }
+    },
+    {
+      "title": "WOPI Request Rate (1h)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+      "id": 5,
+      "datasource": null,
+      "targets": [
+        {
+          "expr": "sum by (operation) (rate(opencloud_docserver_wopi_requests_total{job=~\"$job\",operation=~\"$operation\"}[5m]))",
+          "legendFormat": "{{operation}}",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "legend": { "calcs": ["max", "avg"], "displayMode": "table", "placement": "bottom" },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": {
+        "defaults": { "unit": "ops" },
+        "overrides": []
+      }
+    },
+    {
+      "title": "WOPI Error Rate (1h)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+      "id": 6,
+      "datasource": null,
+      "targets": [
+        {
+          "expr": "sum by (operation, status) (rate(opencloud_docserver_wopi_requests_total{job=~\"$job\",operation=~\"$operation\",status=~\"4..|5..\"}[5m]))",
+          "legendFormat": "{{operation}} {{status}}",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "legend": { "calcs": ["max", "avg"], "displayMode": "table", "placement": "bottom" },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": {
+        "defaults": { "unit": "ops" },
+        "overrides": []
+      }
+    },
+    {
+      "title": "P95 WOPI Latency",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+      "id": 7,
+      "datasource": null,
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, operation) (rate(opencloud_docserver_wopi_request_duration_seconds_bucket{job=~\"$job\",operation=~\"$operation\"}[5m])))",
+          "legendFormat": "{{operation}} p95",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.50, sum by (le, operation) (rate(opencloud_docserver_wopi_request_duration_seconds_bucket{job=~\"$job\",operation=~\"$operation\"}[5m])))",
+          "legendFormat": "{{operation}} p50",
+          "refId": "B"
+        }
+      ],
+      "options": {
+        "legend": { "calcs": ["max", "avg"], "displayMode": "table", "placement": "bottom" },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": {
+        "defaults": { "unit": "s" },
+        "overrides": []
+      }
+    },
+    {
+      "title": "WOPI Lock Operations",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
+      "id": 8,
+      "datasource": null,
+      "targets": [
+        {
+          "expr": "sum by (action) (rate(opencloud_docserver_lock_operations_total{job=~\"$job\"}[5m]))",
+          "legendFormat": "{{action}}",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "legend": { "calcs": ["max", "avg"], "displayMode": "table", "placement": "bottom" },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": {
+        "defaults": { "unit": "ops" },
+        "overrides": []
+      }
+    },
+    {
+      "title": "Memory Usage",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 20 },
+      "id": 9,
+      "datasource": null,
+      "targets": [
+        {
+          "expr": "process_resident_memory_bytes{job=~\"$job\"} / 1024 / 1024",
+          "legendFormat": "RSS {{instance}}",
+          "refId": "A"
+        },
+        {
+          "expr": "process_virtual_memory_bytes{job=~\"$job\"} / 1024 / 1024",
+          "legendFormat": "VSZ {{instance}}",
+          "refId": "B"
+        }
+      ],
+      "options": {
+        "legend": { "calcs": ["max", "avg"], "displayMode": "table", "placement": "bottom" },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": {
+        "defaults": { "unit": "decmbytes" },
+        "overrides": []
+      }
+    },
+    {
+      "title": "CPU Usage",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 20 },
+      "id": 10,
+      "datasource": null,
+      "targets": [
+        {
+          "expr": "rate(process_cpu_seconds_total{job=~\"$job\"}[5m])",
+          "legendFormat": "CPU {{instance}}",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "legend": { "calcs": ["max", "avg"], "displayMode": "table", "placement": "bottom" },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": {
+        "defaults": { "unit": "percentunit" },
+        "overrides": []
+      }
+    },
+    {
+      "title": "PutFile Save-Throughput (MB/s)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 28 },
+      "id": 11,
+      "datasource": null,
+      "targets": [
+        {
+          "expr": "sum(rate(opencloud_docserver_putfile_bytes_total{job=~\"$job\"}[5m])) / 1024 / 1024",
+          "legendFormat": "Saved bytes",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "legend": { "calcs": ["max", "avg"], "displayMode": "table", "placement": "bottom" },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": {
+        "defaults": { "unit": "MBs" },
+        "overrides": []
+      }
+    },
+    {
+      "title": "Error Share (%)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 28 },
+      "id": 12,
+      "datasource": null,
+      "targets": [
+        {
+          "expr": "100 * sum(rate(opencloud_docserver_wopi_requests_total{job=~\"$job\",operation=~\"$operation\",status=~\"5..\"}[5m])) / clamp_min(sum(rate(opencloud_docserver_wopi_requests_total{job=~\"$job\",operation=~\"$operation\"}[5m])), 1)",
+          "legendFormat": "5xx share",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "legend": { "calcs": ["max", "avg"], "displayMode": "table", "placement": "bottom" },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": {
+        "defaults": { "unit": "percent", "max": 100 },
+        "overrides": []
+      }
+    }
+  ],
+  "templating": {
+    "list": [
+      {
+        "name": "job",
+        "type": "query",
+        "query": "label_values(up, job)",
+        "refresh": 1,
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": true
+      },
+      {
+        "name": "operation",
+        "type": "query",
+        "query": "label_values(opencloud_docserver_wopi_requests_total, operation)",
+        "refresh": 1,
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": true
+      }
+    ]
+  },
+  "timepicker": {
+    "refresh_intervals": ["5s", "10s", "30s", "1m", "5m", "15m", "30m", "1h", "2h"],
+    "time_options": ["5m", "15m", "1h", "6h", "12h", "24h", "2d", "7d", "30d"]
+  },
+  "time": { "from": "now-1h", "to": "now" }
+}

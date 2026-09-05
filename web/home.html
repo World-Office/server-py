@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>opencloud-docserver</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="toolbar">
+    <h1 style="font-size:16px;margin:0 8px 0 0;">opencloud-docserver</h1>
+    <span class="spacer"></span>
+    <span id="status" class="status">Stoic document server — OpenCloud WOPI</span>
+  </header>
+
+  <main style="flex-direction:column;align-items:center;gap:24px;">
+    <label class="upload-box">
+      <span>📄 Drop a .docx here or click to upload</span>
+      <input id="file" type="file" accept=".docx" style="display:none">
+    </label>
+
+    <div id="docs" style="width:min(700px,90%);">
+      <h2 style="color:var(--muted);font-size:14px;text-transform:uppercase;">Documents</h2>
+      <ul id="doc-list" style="list-style:none;padding:0;margin:0;"></ul>
+    </div>
+
+    <section id="demo" style="width:min(700px,90%);">
+      <h2 style="color:var(--muted);font-size:14px;text-transform:uppercase;">Demo</h2>
+      <div style="position:relative;width:100%;padding-top:56.25%;border-radius:12px;overflow:hidden;background:#000;">
+        <video controls muted playsinline preload="metadata"
+               style="position:absolute;top:0;left:0;width:100%;height:100%;object-fit:cover;"
+               src="/static/demo.mp4"></video>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const listEl = document.getElementById("doc-list");
+    const fileInput = document.getElementById("file");
+    const status = document.getElementById("status");
+
+    async function loadDocs() {
+      const res = await fetch("/api/documents");
+      const docs = await res.json();
+      listEl.innerHTML = "";
+      if (!docs.length) {
+        listEl.innerHTML = "<li style='color:var(--muted)'>No documents yet.</li>";
+        return;
+      }
+      docs.forEach(d => {
+        const li = document.createElement("li");
+        li.style.margin = "6px 0";
+        const a = document.createElement("a");
+        a.href = "/editor/" + encodeURIComponent(d.id);
+        a.textContent = d.name;
+        a.style.color = "var(--accent)";
+        const size = document.createElement("span");
+        size.textContent = "  " + d.size + " B";
+        size.style.color = "var(--muted)";
+        size.style.fontSize = "12px";
+        li.append(a, size);
+        listEl.appendChild(li);
+      });
+    }
+
+    fileInput.addEventListener("change", async () => {
+      const file = fileInput.files[0];
+      if (!file) return;
+      status.textContent = "Uploading " + file.name + "…";
+      const fd = new FormData();
+      fd.append("file", file);
+      const res = await fetch("/api/upload", { method: "POST", body: fd });
+      const data = await res.json();
+      if (!res.ok) { status.textContent = "Upload failed"; return; }
+      status.textContent = "Uploaded ✓";
+      loadDocs();
+    });
+
+    loadDocs();
+  </script>
+</body>
+</html>

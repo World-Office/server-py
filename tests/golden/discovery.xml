@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<wopi-discovery>
+  <net-zone name="external-http">
+    <app name="WorldOffice" favIconUrl="https://worldoffice.org/favicon.ico">
+      <action name="view" ext="docx" urlsrc="{PUBLIC_URL}/editor"/>
+      <action name="edit" ext="docx" urlsrc="{PUBLIC_URL}/editor"/>
+      <action name="view" ext="odt" urlsrc="{PUBLIC_URL}/editor"/>
+      <action name="edit" ext="odt" urlsrc="{PUBLIC_URL}/editor"/>
+    </app>
+  </net-zone>
+</wopi-discovery>

@@ -1,0 +1,549 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="theme-color" content="#1e1e28">
+  <title>{{ name }} — opencloud-docserver</title>
+  <link rel="manifest" href="/static/manifest.json">
+  <link rel="stylesheet" href="/static/style.css">
+  <style>
+    /* Insert-image dialog styles (scoped here; style.css is maintained
+       separately). The file input needs to be wider than the 84px used by
+       the table dialog's number fields, and the preview/error rows are
+       specific to this dialog. */
+    #image-dialog .dialog-field input[type="file"] { width: auto; max-width: 220px; }
+    .image-preview-wrap { margin: 10px 0; text-align: center; }
+    .image-preview-wrap img {
+      max-width: 220px;
+      max-height: 160px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+    }
+    .image-error { min-height: 16px; margin-top: 8px; font-size: 12px; color: #f87171; }
+
+    /* Find-and-replace dialog styles (scoped here; style.css is maintained
+       separately). Wider dialog with a query row + step arrows, a
+       match-case option, and the counter/status lines. */
+    .find-dialog { width: 380px; }
+    .find-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 12px;
+    }
+    .find-head h3 { margin: 0; }
+    .find-count {
+      font-size: 12px;
+      color: var(--muted);
+      font-variant-numeric: tabular-nums;
+    }
+    .find-count.no-match { color: #f87171; }
+    .find-field-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+    .find-field-row .find-label {
+      font-size: 13px;
+      color: var(--muted);
+      flex: 0 0 auto;
+    }
+    .find-field-row input { flex: 1; width: auto; }
+    .find-arrow { width: 34px; min-width: 34px; padding: 0; }
+    .find-options { margin: 4px 0 10px; }
+    .find-check {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 13px;
+      color: var(--muted);
+      cursor: pointer;
+    }
+    .find-check input { width: auto; }
+    .find-status {
+      min-height: 16px;
+      margin-bottom: 6px;
+      font-size: 12px;
+      color: var(--muted);
+    }
+    .find-status.no-match { color: #f87171; }
+  </style>
+</head>
+<body>
+  <!-- Skip link (WCAG 2.4.1 Bypass Blocks): the first Tab stop jumps
+       keyboard/screen-reader users straight to the document text, past the
+       toolbar. Visually hidden until focused (see .skip-link in style.css). -->
+  <a class="skip-link" href="#editor" data-i18n="A11y.SkipToDocument">Skip to document</a>
+  <!-- Application menu bar: the File menu (New / Open / Export / Print).
+       Placed before the formatting toolbar so a keyboard user landing on the
+       skip link can reach app-level actions without tabbing through every
+       format button. The export submenu exposes per-format items that the
+       editor converts server-side (see editor.js doExport + router.py).
+       aria-haspopup / aria-expanded drive the dropdown disclosure state. -->
+  <nav id="menu-bar" class="menu-bar" aria-label="Application menu" data-i18n-aria-label="MenuBar.Region">
+    <div class="menu">
+      <button type="button" id="btn-file" class="menu-trigger" aria-haspopup="true" aria-expanded="false" data-i18n="Menu.File">File</button>
+      <ul id="file-menu" class="menu-list" role="menu" aria-labelledby="btn-file" hidden>
+        <li role="none"><button type="button" id="btn-new" role="menuitem" data-i18n="Menu.New">New</button></li>
+        <li role="none"><button type="button" id="btn-open" role="menuitem" data-i18n="Menu.Open">Open…</button></li>
+        <li role="none" class="menu-item-export">
+          <button type="button" id="btn-export" role="menuitem" aria-haspopup="true" aria-expanded="false" data-i18n="Menu.Export">Export</button>
+          <ul class="menu-sublist" role="menu" aria-label="Export as" hidden>
+            <li role="none"><button type="button" role="menuitem" data-export="pdf" data-i18n="Menu.ExportPdf">PDF</button></li>
+            <li role="none"><button type="button" role="menuitem" data-export="odt" data-i18n="Menu.ExportOdt">ODT</button></li>
+            <li role="none"><button type="button" role="menuitem" data-export="html" data-i18n="Menu.ExportHtml">HTML</button></li>
+            <li role="none"><button type="button" role="menuitem" data-export="docx" data-i18n="Menu.ExportDocx">DOCX</button></li>
+          </ul>
+        </li>
+        <li role="none" class="menu-sep" aria-hidden="true"></li>
+        <li role="none"><button type="button" id="btn-print" role="menuitem" data-i18n="Menu.Print">Print</button></li>
+        <li role="none"><button type="button" id="btn-history" role="menuitem" data-i18n="Menu.History">History…</button></li>
+        <li role="none"><button type="button" id="btn-ai-review" role="menuitem">AI changes…</button></li>
+      </ul>
+    </div>
+  </nav>
+  <header id="toolbar" class="toolbar" role="toolbar" aria-label="Formatting toolbar" data-i18n-aria-label="Toolbar.Region">
+    <!-- Format group: character styles, font size/family, text color, highlight -->
+    <!-- aria-pressed reflects the live on/off state (JS updateActiveStates);
+         aria-keyshortcuts mirrors the keyboard shortcuts handled in editor.js. -->
+    <button data-cmd="bold" title="Bold (Ctrl+B)" data-i18n-title="Toolbar.BoldTitle" aria-label="Bold" data-i18n-aria-label="Toolbar.Bold" aria-pressed="false" aria-keyshortcuts="Control+B">B</button>
+    <button data-cmd="italic" title="Italic (Ctrl+I)" data-i18n-title="Toolbar.ItalicTitle" aria-label="Italic" data-i18n-aria-label="Toolbar.Italic" aria-pressed="false" aria-keyshortcuts="Control+I"><i>I</i></button>
+    <button data-cmd="underline" title="Underline (Ctrl+U)" data-i18n-title="Toolbar.UnderlineTitle" aria-label="Underline" data-i18n-aria-label="Toolbar.Underline" aria-pressed="false" aria-keyshortcuts="Control+U"><u>U</u></button>
+    <button data-cmd="strikeThrough" title="Strikethrough" data-i18n-title="Toolbar.StrikethroughTitle" aria-label="Strikethrough" data-i18n-aria-label="Toolbar.Strikethrough" aria-pressed="false"><s>S</s></button>
+    <button data-cmd="superscript" title="Superscript" data-i18n-title="Toolbar.SuperscriptTitle" aria-label="Superscript" data-i18n-aria-label="Toolbar.Superscript" aria-pressed="false"><sup>x²</sup></button>
+    <button data-cmd="subscript" title="Subscript" data-i18n-title="Toolbar.SubscriptTitle" aria-label="Subscript" data-i18n-aria-label="Toolbar.Subscript" aria-pressed="false"><sub>x₂</sub></button>
+    <button data-cmd="smallCaps" title="Small caps" data-i18n-title="Toolbar.SmallCapsTitle" aria-label="Small caps" data-i18n-aria-label="Toolbar.SmallCaps" aria-pressed="false">SC</button>
+    <button data-cmd="allCaps" title="Uppercase" data-i18n-title="Toolbar.AllCapsTitle" aria-label="Uppercase" data-i18n-aria-label="Toolbar.AllCaps" aria-pressed="false">A̲</button>
+    <button data-cmd="code" title="Inline code" data-i18n-title="Toolbar.CodeTitle" aria-label="Inline code" data-i18n-aria-label="Toolbar.Code" aria-pressed="false">&lt;/&gt;</button>
+    <select id="font-size" class="toolbar-select" title="Font size" data-i18n-title="Toolbar.FontSizeTitle" aria-label="Font size">
+      <option value="1">8</option>
+      <option value="2">10</option>
+      <option value="3" selected>12</option>
+      <option value="4">14</option>
+      <option value="5">18</option>
+      <option value="6">24</option>
+      <option value="7">36</option>
+    </select>
+    <select id="font-family" class="toolbar-select" title="Font family" data-i18n-title="Toolbar.FontFamilyTitle" aria-label="Font family">
+      <option value="" selected>Default</option>
+      <option value="Arial">Arial</option>
+      <option value="Courier New">Courier New</option>
+      <option value="Georgia">Georgia</option>
+      <option value="Times New Roman">Times New Roman</option>
+      <option value="Verdana">Verdana</option>
+    </select>
+    <label class="color-btn" title="Text color" data-i18n-title="Toolbar.TextColorTitle">
+      <span class="color-key" aria-hidden="true">A</span>
+      <input type="color" id="text-color" value="#333333" aria-label="Text color">
+    </label>
+    <label class="color-btn" title="Highlight color" data-i18n-title="Toolbar.HighlightTitle">
+      <span class="color-key key-highlight" aria-hidden="true">A</span>
+      <input type="color" id="highlight-color" value="#ffe97a" aria-label="Highlight color">
+    </label>
+    <span class="sep"></span>
+    <!-- Paragraph styles: headings + paragraph reset -->
+    <button data-cmd="formatBlock" data-value="H1" title="Heading 1 (Ctrl+Alt+1)" data-i18n-title="Toolbar.Heading1Title" aria-label="Heading 1" data-i18n-aria-label="Toolbar.Heading1Title" aria-pressed="false" aria-keyshortcuts="Control+Alt+1">H1</button>
+    <button data-cmd="formatBlock" data-value="H2" title="Heading 2 (Ctrl+Alt+2)" data-i18n-title="Toolbar.Heading2Title" aria-label="Heading 2" data-i18n-aria-label="Toolbar.Heading2Title" aria-pressed="false" aria-keyshortcuts="Control+Alt+2">H2</button>
+    <button data-cmd="formatBlock" data-value="H3" title="Heading 3 (Ctrl+Alt+3)" data-i18n-title="Toolbar.Heading3Title" aria-label="Heading 3" data-i18n-aria-label="Toolbar.Heading3Title" aria-pressed="false" aria-keyshortcuts="Control+Alt+3">H3</button>
+    <button data-cmd="formatBlock" data-value="P" title="Paragraph (Ctrl+Alt+0)" data-i18n-title="Toolbar.ParagraphTitle" aria-label="Paragraph" data-i18n-aria-label="Toolbar.ParagraphTitle" aria-pressed="false" aria-keyshortcuts="Control+Alt+0">¶</button>
+    <span class="sep"></span>
+    <!-- Alignment group -->
+    <button data-cmd="justifyLeft" title="Align left (Ctrl+Shift+L)" data-i18n-title="Toolbar.AlignLeftTitle" aria-label="Align left" data-i18n-aria-label="Toolbar.AlignLeft" aria-pressed="false" aria-keyshortcuts="Control+Shift+L"><svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M1.5 3.5h10M1.5 7h13M1.5 10.5h10M1.5 14h13"/></svg></button>
+    <button data-cmd="justifyCenter" title="Center (Ctrl+E)" data-i18n-title="Toolbar.AlignCenterTitle" aria-label="Center" data-i18n-aria-label="Toolbar.AlignCenter" aria-pressed="false" aria-keyshortcuts="Control+E"><svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M2.5 3.5h11M1.5 7h13M2.5 10.5h11M1.5 14h13"/></svg></button>
+    <button data-cmd="justifyRight" title="Align right (Ctrl+R)" data-i18n-title="Toolbar.AlignRightTitle" aria-label="Align right" data-i18n-aria-label="Toolbar.AlignRight" aria-pressed="false" aria-keyshortcuts="Control+R"><svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M4.5 3.5h10M1.5 7h13M4.5 10.5h10M1.5 14h13"/></svg></button>
+    <button data-cmd="justifyFull" title="Justify (Ctrl+J)" data-i18n-title="Toolbar.AlignJustifyTitle" aria-label="Justify" data-i18n-aria-label="Toolbar.AlignJustify" aria-pressed="false" aria-keyshortcuts="Control+J"><svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M1.5 3.5h13M1.5 7h13M1.5 10.5h13M1.5 14h13"/></svg></button>
+    <button data-cmd="directionRtl" title="Right-to-left paragraph" data-i18n-title="Toolbar.DirectionRtlTitle" aria-label="Right-to-left" data-i18n-aria-label="Toolbar.DirectionRtl" aria-pressed="false">RTL</button>
+    <span class="sep"></span>
+    <button data-cmd="insertUnorderedList" title="Bullet list (Ctrl+Shift+8)" data-i18n-title="Toolbar.BulletListTitle" aria-label="Bullet list" data-i18n-aria-label="Toolbar.BulletList" aria-pressed="false" aria-keyshortcuts="Control+Shift+8">•≡</button>
+    <button data-cmd="insertOrderedList" title="Numbered list (Ctrl+Shift+7)" data-i18n-title="Toolbar.NumberedListTitle" aria-label="Numbered list" data-i18n-aria-label="Toolbar.NumberedList" aria-pressed="false" aria-keyshortcuts="Control+Shift+7">1≡</button>
+    <span class="sep"></span>
+    <!-- Layout group: indent/outdent + line spacing -->
+    <button data-cmd="indent" title="Increase indent" data-i18n-title="Toolbar.IndentTitle" aria-label="Increase indent" data-i18n-aria-label="Toolbar.Indent"><svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1.5 2.5v11M8.5 8H14.5M5 5.5 8 8l-3 2.5"/></svg></button>
+    <button data-cmd="outdent" title="Decrease indent" data-i18n-title="Toolbar.OutdentTitle" aria-label="Decrease indent" data-i18n-aria-label="Toolbar.Outdent"><svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1.5 2.5v11M1.5 8H8M11.5 5.5 8.5 8l3 2.5"/></svg></button>
+    <select id="line-spacing" class="toolbar-select" title="Line spacing" data-i18n-title="Toolbar.LineSpacingTitle" aria-label="Line spacing">
+      <option value="" selected>Spacing</option>
+      <option value="1">1.0</option>
+      <option value="1.15">1.15</option>
+      <option value="1.5">1.5</option>
+      <option value="2">2.0</option>
+      <option value="2.5">2.5</option>
+      <option value="3">3.0</option>
+    </select>
+    <span class="sep"></span>
+    <button id="btn-table" title="Insert table" data-i18n-title="Toolbar.InsertTableTitle" aria-label="Insert table" data-i18n-aria-label="Toolbar.InsertTable">▦</button>
+    <button id="btn-table-ops" title="Table actions (rows, columns, merge)" aria-label="Table actions">▦✎</button>
+    <button id="btn-image" title="Insert image" data-i18n-title="Toolbar.InsertImageTitle" aria-label="Insert image" data-i18n-aria-label="Toolbar.InsertImageTitle">🖼</button>
+    <button id="btn-link" title="Insert link" aria-label="Insert link">🔗</button>
+    <button id="btn-hr" title="Insert horizontal rule" aria-label="Insert horizontal rule">─</button>
+    <button id="btn-page-break" title="Insert page break" aria-label="Insert page break">⏎</button>
+    <button id="btn-section-break" title="Insert section break" aria-label="Insert section break">⇘</button>
+    <button id="btn-columns" title="Insert columns" aria-label="Insert columns">▥</button>
+    <button id="btn-toc" title="Insert table of contents" aria-label="Insert table of contents">☰</button>
+    <button id="btn-object" title="Insert object" aria-label="Insert object">▢</button>
+    <button id="btn-bookmark" title="Insert bookmark" aria-label="Insert bookmark">📑</button>
+    <button id="btn-crossref" title="Insert cross-reference" aria-label="Insert cross-reference">🔗</button>
+    <button id="btn-track-changes" title="Track changes" aria-label="Track changes" aria-pressed="false">🛠</button>
+    <button id="btn-review-changes" title="Review changes" aria-label="Review changes">✓</button>
+    <button id="btn-comment" title="Add comment" aria-label="Add comment">💬</button>
+    <button id="btn-comments" title="Show comments" aria-label="Show comments">🗒</button>
+    <button id="btn-symbol" title="Insert symbol" aria-label="Insert symbol">Ω</button>
+    <button id="btn-datetime" title="Insert date" aria-label="Insert date">📅</button>
+    <button id="btn-find" title="Find and replace (Ctrl+F)" data-i18n-title="Toolbar.FindTitle" aria-label="Find and replace" data-i18n-aria-label="Toolbar.Find" aria-keyshortcuts="Control+F">🔍</button>
+    <span class="sep"></span>
+    <button id="btn-undo" data-cmd="undo" title="Undo (Ctrl+Z)" data-i18n-title="Toolbar.UndoTitle" aria-label="Undo" data-i18n-aria-label="Toolbar.Undo" aria-keyshortcuts="Control+Z">↶</button>
+    <button id="btn-redo" data-cmd="redo" title="Redo (Ctrl+Y)" data-i18n-title="Toolbar.RedoTitle" aria-label="Redo" data-i18n-aria-label="Toolbar.Redo" aria-keyshortcuts="Control+Y Control+Shift+Z">↷</button>
+    <span class="sep"></span>
+    <!-- View controls: zoom, dark/light theme, fullscreen. -->
+    <button id="btn-zoom-out" title="Zoom out" aria-label="Zoom out" aria-keyshortcuts="Control+Minus">−</button>
+    <button id="btn-zoom-reset" title="Reset zoom" aria-label="Reset zoom">100%</button>
+    <button id="btn-zoom-in" title="Zoom in" aria-label="Zoom in" aria-keyshortcuts="Control+Plus">+</button>
+    <button id="btn-theme" title="Toggle dark/light theme" aria-label="Toggle theme" aria-pressed="true">🌙</button>
+    <button id="btn-fullscreen" title="Toggle fullscreen" aria-label="Toggle fullscreen">⛶</button>
+    <span class="spacer"></span>
+    <!-- Live word/character count, announced politely as it changes. -->
+    <span id="word-count" class="status-meta" role="status" aria-live="polite"></span>
+    <!-- role=status + aria-live=polite: the save/progress/error messages in
+         the status bar are announced to screen readers as they change. -->
+    <span id="status" class="status" role="status" aria-live="polite" data-i18n="Status.Ready">Ready</span>
+    <!-- Offline indicator: shown (with the edit queue armed) whenever a save
+         cannot reach the host; clears automatically on the next success. -->
+    <span id="offline-indicator" class="offline-indicator" role="status" aria-live="polite" hidden data-i18n="Status.OfflineIndicator">Offline</span>
+    <button id="btn-save" class="primary" title="Save (Ctrl+S)" data-i18n="Toolbar.Save" data-i18n-title="Toolbar.SaveTitle" aria-label="Save" data-i18n-aria-label="Toolbar.Save" aria-keyshortcuts="Control+S">Save</button>
+  </header>
+
+  <main>
+    <!-- Rich-text editing surface: explicit textbox role + accessible name
+         so screen readers announce the document when it receives focus. -->
+    <div id="editor" contenteditable="true" spellcheck="true"
+         role="textbox" aria-multiline="true"
+         aria-label="Document" data-i18n-aria-label="A11y.EditorLabel"></div>
+  </main>
+
+  <!-- Insert-table dialog (modal): rows/cols picked here, then a real
+       <table> is inserted at the saved cursor position. -->
+  <div id="table-dialog" class="dialog-overlay" role="dialog" aria-modal="true" aria-labelledby="table-dialog-title">
+    <div class="dialog">
+      <h3 id="table-dialog-title" data-i18n="Toolbar.InsertTable">Insert table</h3>
+      <div class="dialog-field">
+        <label for="table-rows" data-i18n="Table.Rows">Rows</label>
+        <input id="table-rows" type="number" min="1" max="20" value="2" inputmode="numeric">
+      </div>
+      <div class="dialog-field">
+        <label for="table-cols" data-i18n="Table.Columns">Columns</label>
+        <input id="table-cols" type="number" min="1" max="10" value="3" inputmode="numeric">
+      </div>
+      <div class="dialog-actions">
+        <button id="btn-table-cancel">Cancel</button>
+        <button id="btn-table-ok" class="primary">Insert</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Table operations dialog: acts on the cell under the caret (or the
+       selection, for Merge cells). The server round-trips the resulting
+       colspan/rowspan when the DOCX is saved and reloaded. -->
+  <div id="table-ops-dialog" class="dialog-overlay" role="dialog" aria-modal="true" aria-labelledby="table-ops-title">
+    <div class="dialog">
+      <h3 id="table-ops-title">Table actions</h3>
+      <div id="table-ops-hint" class="table-ops-hint" hidden>A cell must be selected to act on a table.</div>
+      <div class="table-ops-grid">
+        <button id="op-row-above">Insert row above</button>
+        <button id="op-row-below">Insert row below</button>
+        <button id="op-col-left">Insert col left</button>
+        <button id="op-col-right">Insert col right</button>
+        <button id="op-del-row">Delete row</button>
+        <button id="op-del-col">Delete column</button>
+        <button id="op-merge">Merge cells</button>
+        <button id="op-split">Split cell</button>
+      </div>
+      <div class="dialog-actions">
+        <button id="btn-table-ops-close">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Insert-image dialog (modal): a local image file is picked and
+       previewed here, then embedded as a self-contained data-URI <img> at
+       the saved cursor position. Nothing leaves the browser until the next
+       save, when the server embeds data-URI images into the stored
+       document (ODT: draw:frame/draw:image binaries). -->
+  <div id="image-dialog" class="dialog-overlay" role="dialog" aria-modal="true" aria-labelledby="image-dialog-title">
+    <div class="dialog">
+      <h3 id="image-dialog-title" data-i18n="Toolbar.InsertImage">Insert image</h3>
+      <div class="dialog-field">
+        <label for="image-file" data-i18n="Image.ChooseFile">Image file</label>
+        <input id="image-file" type="file"
+               accept="image/png,image/jpeg,image/gif,image/bmp,image/webp,image/svg+xml">
+      </div>
+      <div id="image-preview-wrap" class="image-preview-wrap" hidden>
+        <img id="image-preview" alt="">
+      </div>
+      <div class="dialog-field image-size-fields" hidden id="image-size-fields">
+        <label for="image-width" data-i18n="Image.Width">Width</label>
+        <input id="image-width" type="number" min="1" step="1" inputmode="numeric"
+               aria-label="Image width in pixels" placeholder="auto">
+        <label for="image-height" data-i18n="Image.Height">Height</label>
+        <input id="image-height" type="number" min="1" step="1" inputmode="numeric"
+               aria-label="Image height in pixels" placeholder="auto">
+        <span class="image-size-hint" data-i18n="Image.SizeHint">leave empty for original size</span>
+      </div>
+      <div id="image-error" class="image-error" role="alert"></div>
+      <div class="dialog-actions">
+        <button id="btn-image-cancel" data-i18n="Image.Cancel">Cancel</button>
+        <button id="btn-image-ok" class="primary" disabled data-i18n="Image.Insert">Insert</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Insert-link dialog (modal): wraps the current selection (or the typed URL)
+       in an <a href>; the server sanitizer validates the scheme on save. -->
+  <div id="link-dialog" class="dialog-overlay" role="dialog" aria-modal="true" aria-labelledby="link-dialog-title">
+    <div class="dialog">
+      <h3 id="link-dialog-title">Insert link</h3>
+      <div class="dialog-field">
+        <label for="link-url">URL</label>
+        <input id="link-url" type="url" placeholder="https://example.com">
+      </div>
+      <div class="dialog-actions">
+        <button id="btn-link-cancel">Cancel</button>
+        <button id="btn-link-ok" class="primary">Insert</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Columns dialog: wrap the caret position in a multi-column section -->
+  <div id="columns-dialog" class="dialog-overlay" role="dialog" aria-modal="true" aria-labelledby="columns-dialog-title">
+    <div class="dialog">
+      <h3 id="columns-dialog-title">Insert columns</h3>
+      <div class="dialog-field">
+        <label for="columns-count">Columns</label>
+        <input id="columns-count" type="number" min="1" max="6" value="2">
+      </div>
+      <div class="dialog-field">
+        <label for="columns-gap">Gap (px)</label>
+        <input id="columns-gap" type="number" min="0" max="200" value="36">
+      </div>
+      <div class="dialog-actions">
+        <button id="btn-columns-cancel">Cancel</button>
+        <button id="btn-columns-ok" class="primary">Insert</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Table-of-contents dialog -->
+  <div id="toc-dialog" class="dialog-overlay" role="dialog" aria-modal="true" aria-labelledby="toc-dialog-title">
+    <div class="dialog">
+      <h3 id="toc-dialog-title">Insert table of contents</h3>
+      <div class="dialog-field">
+        <label for="toc-title">Title</label>
+        <input id="toc-title" type="text" placeholder="Table of Contents" value="Table of Contents">
+      </div>
+      <div class="dialog-actions">
+        <button id="btn-toc-cancel">Cancel</button>
+        <button id="btn-toc-ok" class="primary">Insert</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Object (shape / text box / chart / equation) dialog -->
+  <div id="object-dialog" class="dialog-overlay" role="dialog" aria-modal="true" aria-labelledby="object-dialog-title">
+    <div class="dialog">
+      <h3 id="object-dialog-title">Insert object</h3>
+      <div class="dialog-field">
+        <label for="object-type">Type</label>
+        <select id="object-type">
+          <option value="shape">Shape</option>
+          <option value="textbox">Text box</option>
+          <option value="chart">Chart</option>
+          <option value="equation">Equation</option>
+        </select>
+      </div>
+      <div class="dialog-field">
+        <label for="object-label">Label</label>
+        <input id="object-label" type="text" placeholder="optional">
+      </div>
+      <div class="dialog-field">
+        <label for="object-content">Content</label>
+        <textarea id="object-content" rows="3" placeholder="text inside the object (text box / equation)"></textarea>
+      </div>
+      <div class="dialog-actions">
+        <button id="btn-object-cancel">Cancel</button>
+        <button id="btn-object-ok" class="primary">Insert</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Bookmark dialog -->
+  <div id="bookmark-dialog" class="dialog-overlay" role="dialog" aria-modal="true" aria-labelledby="bookmark-dialog-title">
+    <div class="dialog">
+      <h3 id="bookmark-dialog-title">Insert bookmark</h3>
+      <div class="dialog-field">
+        <label for="bookmark-name">Name</label>
+        <input id="bookmark-name" type="text" placeholder="e.g. Section1">
+      </div>
+      <div class="dialog-actions">
+        <button id="btn-bookmark-cancel">Cancel</button>
+        <button id="btn-bookmark-ok" class="primary">Insert</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Cross-reference dialog -->
+  <div id="crossref-dialog" class="dialog-overlay" role="dialog" aria-modal="true" aria-labelledby="crossref-dialog-title">
+    <div class="dialog">
+      <h3 id="crossref-dialog-title">Insert cross-reference</h3>
+      <div class="dialog-field">
+        <label for="crossref-target">Target bookmark</label>
+        <select id="crossref-target"></select>
+      </div>
+      <div class="dialog-field">
+        <label for="crossref-text">Display text</label>
+        <input id="crossref-text" type="text" placeholder="optional (defaults to target name)">
+      </div>
+      <div class="dialog-actions">
+        <button id="btn-crossref-cancel">Cancel</button>
+        <button id="btn-crossref-ok" class="primary">Insert</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Version-history dialog: lists saved snapshots newest-first with a Restore
+       button per entry; the head version is marked Current. Restore rewinds the
+       stored document and reloads the editor. -->
+  <div id="version-history-dialog" class="dialog-overlay" role="dialog" aria-modal="true" aria-labelledby="version-history-title">
+    <div class="dialog">
+      <h3 id="version-history-title" data-i18n="VersionHistory.Title">Version history</h3>
+      <div id="version-list" class="version-list" role="list" aria-label="Version history"></div>
+      <div id="version-error" class="version-error" role="alert"></div>
+      <div class="dialog-actions">
+        <button id="btn-version-close" data-i18n="VersionHistory.Close">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- AI review dialog: the op-stream diff of agent edits. Agents edit
+       through the same CRDT pipeline as humans, and their ops carry an
+       "agent=<name>" site, so each row is one attributable op with a Reject
+       button (inverse op applied as the "reviewer" client). Full rollback
+       to any prior revision stays in the version-history dialog. -->
+  <div id="ai-review-dialog" class="dialog-overlay" role="dialog" aria-modal="true" aria-labelledby="ai-review-title">
+    <div class="dialog">
+      <h3 id="ai-review-title">AI changes</h3>
+      <div id="ai-review-list" class="version-list" role="list" aria-label="AI changes"></div>
+      <div id="ai-review-error" class="version-error" role="alert"></div>
+      <div class="dialog-actions">
+        <button id="btn-ai-reject-all">Reject all</button>
+        <button id="btn-ai-review-close">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Symbol/emoji picker dialog: clicking a symbol inserts it as plain text
+       at the saved caret (execCommand insertText), so it persists after save
+       and needs no converter support of its own. -->
+  <div id="symbol-dialog" class="dialog-overlay" role="dialog" aria-modal="true" aria-labelledby="symbol-dialog-title">
+    <div class="dialog">
+      <h3 id="symbol-dialog-title">Insert symbol</h3>
+      <div id="symbol-grid" class="symbol-grid" role="listbox" aria-label="Symbols"></div>
+      <div class="dialog-actions">
+        <button id="btn-symbol-close">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Find-and-replace dialog: search the document, step through matches
+       (highlighted with the native selection — the DOM is never mutated for
+       highlighting) and replace single occurrences or all at once. Replace
+       controls are disabled in read-only documents; finding stays
+       available. Keyboard: Enter/Shift+Enter step next/previous, Ctrl+F
+       re-opens, Escape closes. -->
+  <div id="find-dialog" class="dialog-overlay" role="dialog" aria-modal="true" aria-labelledby="find-dialog-title">
+    <div class="dialog find-dialog">
+      <div class="find-head">
+        <h3 id="find-dialog-title" data-i18n="Toolbar.Find">Find and replace</h3>
+        <span id="find-count" class="find-count" role="status">0 / 0</span>
+      </div>
+      <div class="find-field-row">
+        <label for="find-query" class="find-label" data-i18n="Find.SearchLabel">Find</label>
+        <input id="find-query" type="text" spellcheck="false"
+               placeholder="Search in document"
+               data-i18n-placeholder="Find.SearchPlaceholder">
+        <button id="btn-find-prev" class="find-arrow" title="Previous (Shift+Enter)" data-i18n-title="Find.Prev" aria-label="Previous match">▲</button>
+        <button id="btn-find-next" class="find-arrow" title="Next (Enter)" data-i18n-title="Find.Next" aria-label="Next match">▼</button>
+      </div>
+      <div class="find-field-row">
+        <label for="find-replace" class="find-label" data-i18n="Find.ReplaceLabel">Replace with</label>
+        <input id="find-replace" type="text" spellcheck="false">
+      </div>
+      <div class="find-options">
+        <label class="find-check">
+          <input id="find-match-case" type="checkbox">
+          <span data-i18n="Find.MatchCase">Match case</span>
+        </label>
+      </div>
+      <div id="find-status" class="find-status" role="status"></div>
+      <div class="dialog-actions">
+        <button id="btn-find-close" data-i18n="Find.Close">Close</button>
+        <button id="btn-find-replace" data-i18n="Find.Replace">Replace</button>
+        <button id="btn-find-replace-all" class="primary" data-i18n="Find.ReplaceAll">Replace all</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    window.__DOC_ID__ = {{ doc_id | tojson }};
+    window.__DOC_NAME__ = {{ name | tojson }};
+    window.__READ_ONLY__ = {{ read_only | tojson }};
+    window.__SESSION__ = {{ session_id | tojson }};
+  </script>
+  <script src="/static/i18n.js"></script>
+  <script src="/static/editor.js"></script>
+  <script>
+    // Register the service worker for offline support (offline-pwa feature).
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('/static/sw.js').catch((err) => {
+          console.warn('SW registration failed:', err);
+        });
+      });
+    }
+  </script>
+  <!-- Review panel: list track-changes for accept/reject -->
+  <aside id="review-panel" class="side-panel" aria-label="Review changes" hidden>
+    <div class="side-panel-header">
+      <h3>Review changes</h3>
+      <button id="btn-review-close" aria-label="Close review panel">✕</button>
+    </div>
+    <div id="review-list" class="review-list"></div>
+    <p id="review-empty" class="review-empty">No tracked changes.</p>
+  </aside>
+
+  <!-- Comment dialog -->
+  <div id="comment-dialog" class="dialog-overlay" role="dialog" aria-modal="true" aria-labelledby="comment-dialog-title">
+    <div class="dialog">
+      <h3 id="comment-dialog-title">Add comment</h3>
+      <div class="dialog-field">
+        <label for="comment-body">Comment</label>
+        <textarea id="comment-body" rows="3" placeholder="Your comment"></textarea>
+      </div>
+      <div class="dialog-actions">
+        <button id="btn-comment-cancel">Cancel</button>
+        <button id="btn-comment-ok" class="primary">Comment</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Comments panel -->
+  <aside id="comments-panel" class="side-panel" aria-label="Comments" hidden>
+    <div class="side-panel-header">
+      <h3>Comments</h3>
+      <button id="btn-comments-close" aria-label="Close comments panel">✕</button>
+    </div>
+    <div id="comments-list" class="review-list"></div>
+    <p id="comments-empty" class="review-empty">No comments.</p>
+  </aside>
+
+</body>
+</html>

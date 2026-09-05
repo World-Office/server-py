@@ -1,0 +1,57 @@
+# opencloud-docserver — full stack with OpenCloud (OCIS)
+#
+#   docker compose up -d
+#
+# The docserver starts first; OCIS is configured to treat it as the
+# WOPI app for office documents (via Open App Registry env vars).
+#
+# Set these in your shell before bringing the stack up:
+#   export DOCSERVER_JWT_SECRET="$(openssl rand -base64 48)"
+#
+# NOTE: For a production OCIS deployment, read OCIS docs on configuring
+# a custom WOPI app. This compose file is the minimal development
+# loop: docserver + OCIS + the Traefik reverse proxy.
+
+services:
+  docserver:
+    build: .
+    image: opencloud-docserver:latest
+    restart: unless-stopped
+    environment:
+      DOCSERVER_PORT: "8000"
+      DOCSERVER_JWT_SECRET: "${DOCSERVER_JWT_SECRET:-change-me-32-chars-minimum}"
+      DOCSERVER_PUBLIC_URL: "http://localhost:8000"
+      DOCSERVER_CORS_ORIGINS: "*"
+    volumes:
+      - docserver-data:/app/data
+    ports:
+      - "8000:8000"
+    networks:
+      - world-office
+
+  # Reverse proxy for the whole stack (Stoic default: automatic TLS or none)
+  traefik:
+    image: traefik:v3.1
+    restart: unless-stopped
+    command:
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entrypoints.web.address=:80"
+    ports:
+      - "80:80"
+      - "8080:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - world-office
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.docs.rule=Host(`docs.local`)"
+      - "traefik.http.services.docs.loadbalancer.server.port=8000"
+
+volumes:
+  docserver-data:
+
+networks:
+  world-office:
+    driver: bridge

@@ -1,0 +1,27 @@
+[Unit]
+Description=opencloud-docserver (WOPI document server for OpenCloud)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=docserver
+Group=docserver
+WorkingDirectory=/opt/opencloud-docserver
+EnvironmentFile=/etc/opencloud-docserver/env
+ExecStart=/opt/opencloud-docserver/.venv/bin/uvicorn --host 0.0.0.0 --port ${DOCSERVER_PORT:-8000} src.main:app
+Restart=on-failure
+RestartSec=5
+# Hardening (Stoic: least privilege, no surprises)
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/opencloud-docserver/data
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+LimitNOFILE=4096
+
+[Install]
+WantedBy=multi-user.target

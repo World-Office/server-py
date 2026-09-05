@@ -1,0 +1,45 @@
+{
+  "applied": [
+    {
+      "b": 1,
+      "chars": "hello",
+      "n": 5,
+      "originSeq": 0,
+      "originSite": "",
+      "s": "site-1",
+      "t": "insert"
+    },
+    {
+      "b": 6,
+      "chars": " world",
+      "n": 6,
+      "originSeq": 5,
+      "originSite": "site-1",
+      "s": "site-1",
+      "t": "insert"
+    }
+  ],
+  "doc_id": "golden-doc",
+  "ops": [
+    {
+      "b": 1,
+      "chars": "hello",
+      "n": 5,
+      "originSeq": 0,
+      "originSite": "",
+      "s": "site-1",
+      "t": "insert"
+    },
+    {
+      "b": 6,
+      "chars": " world",
+      "n": 6,
+      "originSeq": 5,
+      "originSite": "site-1",
+      "s": "site-1",
+      "t": "insert"
+    }
+  ],
+  "rev": 2,
+  "text": "hello world"
+}

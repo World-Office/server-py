@@ -1,0 +1,155 @@
+[
+  {
+    "description": "Read a document: metadata, current collaborative text, and the tail of the op log. Unknown ids return a not-found result, never an error.",
+    "inputSchema": {
+      "properties": {
+        "doc_id": {
+          "description": "Document id (WOPI file id).",
+          "type": "string"
+        },
+        "include_content": {
+          "description": "Include raw stored bytes as base64 (default false).",
+          "type": "boolean"
+        },
+        "ops_tail": {
+          "description": "How many of the latest ops to include (default 50).",
+          "maximum": 500,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "doc_id"
+      ],
+      "type": "object"
+    },
+    "name": "read_doc"
+  },
+  {
+    "description": "Apply edits through the collaboration op pipeline. Two op kinds are accepted and they may be mixed: plain text edits {\"t\": \"ins\", \"at\": <visible char index>, \"text\": \"...\"} and {\"t\": \"del\", \"at\": <start>, \"end\": <exclusive end>} (indices refer to the text state after the previous edit in the same call), or raw CRDT wire ops ({\"t\": \"insert\"|\"delete\", ...}). The call is rejected with the 409 lock-mismatch contract when another client holds the lock and no matching lock_token is supplied.",
+    "inputSchema": {
+      "properties": {
+        "base_rev": {
+          "description": "Client's last known revision (optional; heals gaps in the reply).",
+          "type": "integer"
+        },
+        "client_id": {
+          "description": "Agent identity, must start with 'agent=' \u2014 e.g. 'agent=alfie'.",
+          "pattern": "^agent=",
+          "type": "string"
+        },
+        "doc_id": {
+          "description": "Document id (WOPI file id).",
+          "type": "string"
+        },
+        "lock_token": {
+          "description": "WOPI lock token; required to match when the document is locked.",
+          "type": "string"
+        },
+        "ops": {
+          "description": "Edits to apply, in order.",
+          "items": {
+            "type": "object"
+          },
+          "maxItems": 200,
+          "type": "array"
+        }
+      },
+      "required": [
+        "doc_id",
+        "client_id",
+        "ops"
+      ],
+      "type": "object"
+    },
+    "name": "apply_ops"
+  },
+  {
+    "description": "List a document's stored versions, newest first (metadata only).",
+    "inputSchema": {
+      "properties": {
+        "doc_id": {
+          "description": "Document id (WOPI file id).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "doc_id"
+      ],
+      "type": "object"
+    },
+    "name": "get_versions"
+  },
+  {
+    "description": "WOPI lock plane. Actions: 'lock' (first-writer-wins; same token = refresh), 'unlock', 'refresh', 'get'. A conflicting lock returns the 409 lock-mismatch contract with the current token echoed.",
+    "inputSchema": {
+      "properties": {
+        "action": {
+          "description": "Which lock operation to perform.",
+          "enum": [
+            "lock",
+            "unlock",
+            "refresh",
+            "get"
+          ],
+          "type": "string"
+        },
+        "doc_id": {
+          "description": "Document id (WOPI file id).",
+          "type": "string"
+        },
+        "token": {
+          "description": "Lock token (required non-empty for lock/unlock/refresh).",
+          "type": "string"
+        },
+        "user": {
+          "description": "Display name of the lock owner.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "doc_id",
+        "action"
+      ],
+      "type": "object"
+    },
+    "name": "lock"
+  },
+  {
+    "description": "Announce/update the agent on a document's presence list, or leave it (leave=true). Agents appear with an agent badge.",
+    "inputSchema": {
+      "properties": {
+        "client_id": {
+          "description": "Agent identity, must start with 'agent='.",
+          "pattern": "^agent=",
+          "type": "string"
+        },
+        "cursor": {
+          "description": "Visible character index the agent is looking at.",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "doc_id": {
+          "description": "Document id (WOPI file id).",
+          "type": "string"
+        },
+        "leave": {
+          "description": "True to remove the agent from the presence list.",
+          "type": "boolean"
+        },
+        "user": {
+          "description": "Display name (defaults to client_id).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "doc_id",
+        "client_id"
+      ],
+      "type": "object"
+    },
+    "name": "presence"
+  }
+]

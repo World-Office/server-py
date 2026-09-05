@@ -1,0 +1,29 @@
+# OpenCloud DocServer — configuration
+#
+# All values may be overridden by environment variables with the DOCSERVER_
+# prefix (e.g. DOCSERVER_PORT). Environment variables win over this file.
+
+[server]
+# Port the HTTP server listens on
+port = 8000
+# Bind address (use 0.0.0.0 inside Docker, 127.0.0.1 for local dev)
+host = "0.0.0.0"
+
+[security]
+# Shared HMAC secret for WOPI JWT tokens (must match OCIS).
+# Use `openssl rand -base64 48` to generate. NEVER commit a real secret.
+jwt_secret = "change-me-32-chars-minimum"
+# How long WOPI tokens remain valid, in seconds
+jwt_ttl = 3600
+
+[storage]
+# Path to the SQLite database file
+database = "data/docserver.db"
+# Directory where uploaded document content is stored
+content_dir = "data/documents"
+
+[app]
+# Public URL of this docserver (used in links returned to clients)
+public_url = "http://localhost:8000"
+# Comma-separated list of allowed CORS origins (* = any)
+cors_origins = "*"

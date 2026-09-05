@@ -1,0 +1,15 @@
+{
+  "BaseFileName": "hello.docx",
+  "OwnerId": "golden-doc",
+  "ReadOnly": false,
+  "Size": 36584,
+  "SupportsGetLock": true,
+  "SupportsLocks": true,
+  "SupportsRename": false,
+  "SupportsUpdate": true,
+  "UserCanNotWrite": false,
+  "UserCanRename": true,
+  "UserCanWrite": true,
+  "UserFriendlyName": "Local User",
+  "UserId": "golden-doc"
+}
