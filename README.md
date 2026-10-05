@@ -1,5 +1,12 @@
 # opencloud-docserver
 
+> ⚠️ **Deprecated — this project's focus is Rust.**
+> The canonical World-Office stack is **Rust + TypeScript**
+> ([`World-Office/server`](https://github.com/World-Office/server), container
+> `docserver-1` on `:8082`). This Python (FastAPI/WOPI) docserver is an
+> **archived reference implementation**, kept for history and comparison only.
+> It receives no feature work and is not the deployed product.
+
 Stoic Linux document server for [OpenCloud](https://opencloud.eu) (OCIS),
 integrated via the [WOPI](https://learn.microsoft.com/en-us/microsoft-365/cloud-storage-partner-program/rest/) protocol.
 
