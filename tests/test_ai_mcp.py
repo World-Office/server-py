@@ -120,7 +120,7 @@ def test_serve_survives_garbage_lines_and_answers_valid_ones(server):
     assert len(lines) == 3
     assert lines[0]["error"]["code"] == -32700  # parse error, loop continued
     assert lines[1]["result"] == {}
-    assert len(lines[2]["result"]["tools"]) == 5
+    assert len(lines[2]["result"]["tools"]) == 7
 
 
 def test_build_context_standalone(tmp_path):

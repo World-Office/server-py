@@ -86,6 +86,14 @@ def test_switch_view_mode(in_run_folder, run_id):
     assert page.locator(f"[data-test-resource-name={name!r}]").count() >= 1, (
         "file lost after view-mode switch"
     )
+    # restore the view: the mode persists as a server-side user preference —
+    # leaving it flipped poisons every later GUI module (the tiles context
+    # menu lacks e.g. 'Rename', which breaks downstream right-click tests)
+    page.get_by_role("button", name="Switch view mode").click()
+    page.wait_for_timeout(2000)
+    assert page.locator(f"[data-test-resource-name={name!r}]").count() >= 1, (
+        "file lost after view-mode restore"
+    )
     dav_delete(f"{run_id}/{name}")
 
 

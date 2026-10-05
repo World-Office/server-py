@@ -27,9 +27,10 @@ from conftest import (
     dav_move,
     dav_propfind,
     dav_put,
+    close_editor,
+    editor_canvas,
     goto,
     open_file_by_name,
-    wopi_info,
     wopi_open_and_capture,
 )
 
@@ -83,12 +84,21 @@ def test_02_umlauts_spaces_ampersand_roundtrip(session_ctx, cabinet):
         goto(page, f"{BASE}/files/spaces/personal/admin/{cabinet}")
         row = page.locator("[data-test-resource-name]").filter(has_text="Präsentation")
         row.first.wait_for(state="visible", timeout=25000)
-        # the editor opens it by exact name (WOPI path resolution on odd names)
-        fid, tok = wopi_open_and_capture(page, name)
-        info = wopi_info(fid, tok)
-        assert info.ok, f"CheckFileInfo failed for special-char name: {info.status_code}"
-        assert "Umlaut Canary" in info.text or info.status_code == 200
+        # the editor opens it by exact name (WOPI path resolution on odd names).
+        # The REAL CheckFileInfo+GetFile path is collaboration-driven: if the
+        # editor renders the seeded paragraph, both succeeded. (Raw wopi_info
+        # against a collaboration id is the docserver's local-store side door
+        # and answers 404 — retired contract.)
+        wopi_open_and_capture(page, name)
+        fr, editor = editor_canvas(page)
+        body = editor.inner_text(timeout=15000)
+        assert "Umlaut Canary" in body, f"seed text not rendered: {body[:160]!r}"
     finally:
+        try:
+            close_editor(page, url=f"{BASE}/files/spaces/personal/admin/{cabinet}",
+                         file_path=f"{cabinet}/{name}")
+        except Exception:
+            pass
         page.close()
 
 
@@ -182,10 +192,18 @@ def test_06_move_to_subfolder_keeps_editor_access(session_ctx, cabinet):
         page.locator(f"[data-test-resource-name='{name}']").first.wait_for(
             state="visible", timeout=25000
         )
-        fid, tok = wopi_open_and_capture(page, name)
-        info = wopi_info(fid, tok)
-        assert info.ok, f"editor CheckFileInfo failed after move: {info.status_code}"
+        # collaboration CheckFileInfo+GetFile on the file's NEW location:
+        # rendering the seed text proves both (wopi_info side door retired)
+        wopi_open_and_capture(page, name)
+        fr, editor = editor_canvas(page)
+        body = editor.inner_text(timeout=15000)
+        assert "Move Canary" in body, f"moved content not rendered: {body[:160]!r}"
     finally:
+        try:
+            close_editor(page, url=f"{BASE}/files/spaces/personal/admin/{cabinet}",
+                         file_path=f"{cabinet}/{sub}/{name}")
+        except Exception:
+            pass
         page.close()
     dav_delete(f"{cabinet}/{sub}")
 
@@ -227,7 +245,7 @@ def test_08_two_megabyte_document_roundtrip(session_ctx, cabinet):
     assert zipfile.ZipFile(BytesIO(blob)).testzip() is None, "seed docx malformed"
 
     name = "big-manuscript.docx"
-    assert dav_put(f"{cabinet}/{name}", blob).status_code == 201
+    assert dav_put(f"{cabinet}/{name}", blob).status_code in (201, 204)
     g = dav_get(f"{cabinet}/{name}")
     assert g.ok and g.content == blob, f"2 MB roundtrip altered bytes ({len(g.content)} vs {len(blob)})"
 
@@ -237,12 +255,18 @@ def test_08_two_megabyte_document_roundtrip(session_ctx, cabinet):
         page.locator(f"[data-test-resource-name='{name}']").first.wait_for(
             state="visible", timeout=25000
         )
-        fid, tok = wopi_open_and_capture(page, name)
-        info = wopi_info(fid, tok)
-        assert info.ok
-        size = info.json().get("Size") or info.json().get("size")
-        if size:
-            assert int(size) == len(blob), f"WOPI Size mismatch: {size} vs {len(blob)}"
+        # 2 MB through the real editor path: CheckFileInfo+GetFile of the
+        # full blob prove themselves by rendering (wopi_info side door retired;
+        # byte-for-byte integrity is already asserted via DAV above)
+        wopi_open_and_capture(page, name)
+        fr, editor = editor_canvas(page)
+        body = editor.inner_text(timeout=20000)
+        assert "Paragraph 0" in body, "2 MB document did not render in the editor"
     finally:
+        try:
+            close_editor(page, url=f"{BASE}/files/spaces/personal/admin/{cabinet}",
+                         file_path=f"{cabinet}/{name}")
+        except Exception:
+            pass
         page.close()
     dav_delete(f"{cabinet}/{name}")

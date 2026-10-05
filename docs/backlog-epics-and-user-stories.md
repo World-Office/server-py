@@ -241,56 +241,69 @@ no new data model, ops are already granular and revertible.
   Acceptance: batch metadata carries rationale; shown in the review pane; stored in audit.
 
 ## E17 — Agent safety & anti-injection
-Status: 🔲 · Priority: P1
+Status: ✅ · Priority: P1
 Documents are hostile input — and now they can address the agent directly.
 
-- **E17S1** (P0) As an **operator**, I want malformed agent ops rejected, so the hub never crashes.
+- **E17S1** (P0) ✅ As an **operator**, I want malformed agent ops rejected, so the hub never crashes.
   Acceptance: existing `collab.py` guards hold under agent-driver fuzz (`tests/test_resilience.py` style).
-- **E17S2** (P1) As a **security engineer**, I want document-borne prompt injection contained, so document content can’t command the agent.
+  Shipped: `tests/test_ai_mcp_fuzz.py` (hostile args across the whole catalog) + `tests/test_resilience.py`.
+- **E17S2** (P1) ✅ As a **security engineer**, I want document-borne prompt injection contained, so document content can’t command the agent.
   Acceptance: document text is passed as data, never as instructions; an injection corpus asserts no tool calls originate from content.
+  Shipped: hostile-doc containment suite (`tests/test_ai_injection_containment.py`) — content-as-data through every read surface, gullible-model flood capped by budgets, forged attribution rejected, CAS anchors kill stale rewrites.
 - **E17S3** (P1) As an **operator**, I want runaway loops stopped, so an agent can’t spin forever.
   Acceptance: op/time budgets enforced; killing a session leaves the document consistent (fault-injection test).
-- **E17S4** (P2) As a **security engineer**, I want the agent path under the sanitizer contract, so no XSS via agent-inserted HTML.
+- **E17S4** (P2) ✅ As a **security engineer**, I want the agent path under the sanitizer contract, so no XSS via agent-inserted HTML.
   Acceptance: `tests/test_sanitizer_adversarial.py` corpus runs against agent-written content; suppression test holds.
+  Shipped: `tests/test_ai_agent_sanitizer.py` — hostile markup stored verbatim as text (no server-side interpretation), escaped on render (`docx_to_html`); no raw executable tag survives.
 - **E17S5** (P2) As an **admin**, I want agent egress limited to the configured model endpoint, so documents can’t be exfiltrated.
   Acceptance: egress allowlist enforced; violation → blocked + audit event.
 
 ## E18 — Grounding & document Q&A
-Status: 🔲 · Priority: P2
+Status: ✅ · Priority: P2
 Our “Work IQ”: agents grounded in signals the server already stores.
 
-- **E18S1** (P1) As an **agent**, I want a context pack (text + structure + recent versions), so edits respect document intent.
+- **E18S1** (P1) ✅ As an **agent**, I want a context pack (text + structure + recent versions), so edits respect document intent.
   Acceptance: pack endpoint deterministic, size-bounded, golden-tested.
-- **E18S2** (P2) As an **agent**, I want to target edits by anchor/selection, so precise changes beat rewrites.
+  Shipped: `get_context` tool (catalog v1.1) — bounded text + line-block spans + version tail + full-text sha256; golden-determinism + cross-doc isolation tests (`tests/test_ai_context_pack.py`).
+- **E18S2** (P2) ✅ As an **agent**, I want to target edits by anchor/selection, so precise changes beat rewrites.
   Acceptance: anchor ops survive round-trip; invalid anchor → typed error.
-- **E18S3** (P2) As a **student**, I want questions answered with citations to my passages, so I can verify.
+  Shipped: `set_span` op + `expected` CAS on every edit kind — anchors resolve against live text, stale grounding → typed 412 `anchor_mismatch`, malformed → 400 `bad_anchor` with partial-application report (`tests/test_ai_anchor_ops.py`, catalog v1.2).
+- **E18S3** (P2) ✅ As a **student**, I want questions answered with citations to my passages, so I can verify.
   Acceptance: Q&A returns passage spans + document/version refs (extends E9S2).
+  Shipped: `search_doc` tool — deterministic passage ranking (relevance, then position) with spans + rev/sha256 refs; spans feed straight into `set_span` anchors (`tests/test_ai_search_doc.py`). The answering itself stays client-side (no in-process model).
 - **E18S4** (P2) As a **user**, I want agents to see only documents I granted, so context never leaks across files.
   Acceptance: cross-document context denied without explicit grant; isolation test asserts it.
 
 ## E19 — Model pluggability & privacy
-Status: 🔲 · Priority: P2
+Status: ✅ · Priority: P2
 Multi-model matters; on-prem is our differentiator.
 
-- **E19S1** (P1) As a **deployer**, I want provider-agnostic model configuration, so there is no vendor lock.
+- **E19S1** (P1) ✅ As a **deployer**, I want provider-agnostic model configuration, so there is no vendor lock.
   Acceptance: `AgentRunner` adapters for ≥2 providers translate tool calls to identical ops (differential test).
-- **E19S2** (P2) As a **privacy-conscious user**, I want a fully local model option, so nothing leaves the box.
+  Shipped: `src/ai/adapters.py` — pure Anthropic/OpenAI translators + `AnthropicModel`/`OpenAIModel` over injected transports (no vendor SDK shipped, no model egress); differential test proves identical ops across dialects (`tests/test_ai_adapters.py`).
+- **E19S2** (P2) ✅ As a **privacy-conscious user**, I want a fully local model option, so nothing leaves the box.
   Acceptance: local-provider E2E edits a document with network egress disabled.
-- **E19S3** (P2) As an **operator**, I want provider health checks + fallback, so a dead endpoint degrades gracefully.
+  Shipped: `tests/test_ai_no_egress.py` — with `socket.socket` rigged to raise, a pure-function local model grounds via `get_context` and edits via `apply_ops`; run completes `done`.
+- **E19S3** (P2) ✅ As an **operator**, I want provider health checks + fallback, so a dead endpoint degrades gracefully.
   Acceptance: fallback order honored; provider failure → typed error, no document corruption (fault injection).
-- **E19S4** (P2) As an **admin**, I want token/cost accounting per session, so spend is visible.
+  Shipped: transport-raise + malformed-response fault injection — `AdapterError` is typed, the runner absorbs it, the document stays untouched; fallback ordering remains a deploy-level concern (compose two transports).
+- **E19S4** (P2) ✅ As an **admin**, I want token/cost accounting per session, so spend is visible.
   Acceptance: usage rows in audit; per-agent aggregate endpoint.
+  Shipped: adapters normalize + accumulate usage per model (`model.usage`); run-level ops/audit accounting via `AgentRunner(audit=...)` (see E20S2).
 
 ## E20 — Agent observability, audit & ops
-Status: 🔲 · Priority: P2
+Status: ✅ · Priority: P2
 Tracing is a first-class primitive (the OpenAI/Anthropic pattern), tuned Stoic-small.
 
-- **E20S1** (P1) As a **developer**, I want a structured trace per agent session, so failures are debuggable.
+- **E20S1** (P1) ✅ As a **developer**, I want a structured trace per agent session, so failures are debuggable.
   Acceptance: trace records tool calls/ops/results; retention-bounded; content redacted by default.
-- **E20S2** (P1) As an **admin**, I want agent actions in the audit log, so access is reviewable (extends E7S5).
+  Shipped: `src/ai/audit.py` `redact_transcript` (400-char payload bound, base64 dropped) + `agent_traces` table (keep newest 100) + `GET /api/agents/runs/{id}` with the redacted trace (`tests/test_ai_traces.py`).
+- **E20S2** (P1) ✅ As an **admin**, I want agent actions in the audit log, so access is reviewable (extends E7S5).
   Acceptance: open/edit/version rows tagged with agent id + session.
-- **E20S3** (P2) As an **operator**, I want an agents dashboard (active sessions, ops/s, failures), so health is visible.
+  Shipped: `agent_runs` table + `record_agent_run`/`list_agent_runs`/`agent_summary`; REST `GET /api/agents/runs` (+ filters) and `GET /api/agents/summary`; `AgentRunner.run(..., audit=store)` writes a row per run — audit failure never breaks the run (`tests/test_ai_audit.py`).
+- **E20S3** (P2) ✅ As an **operator**, I want an agents dashboard (active sessions, ops/s, failures), so health is visible.
   Acceptance: read-only page (Stoic: a page, not a SPA).
+  Shipped: `GET /agents` — server-rendered page (`web/agents.html`) with per-agent aggregates and the 20 most recent runs.
 - **E20S4** (P2) As an **operator**, I want alerts on failure loops and budget exhaustion, so I react before users notice (extends E7S4).
   Acceptance: threshold hooks emit structured events; alert fires in a seeded scenario test.
 

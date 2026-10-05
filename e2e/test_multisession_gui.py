@@ -41,16 +41,25 @@ def test_two_sessions_open_same_document(pw, session_ctx, run_id):
     goto(p1, f"{BASE}/files/spaces/personal/admin/{run_id}")
     p1.wait_for_timeout(2500)
     open_file_by_name(p1, name)
-    fr1, canvas1 = editor_canvas(p1)
+    fr1, editor1 = editor_canvas(p1)
 
     goto(p2, f"{BASE}/files/spaces/personal/admin/{run_id}")
     p2.wait_for_timeout(2500)
     open_file_by_name(p2, name)
-    fr2, canvas2 = editor_canvas(p2)
+    fr2, editor2 = editor_canvas(p2)
 
-    assert canvas1.is_visible() and canvas2.is_visible(), (
+    assert editor1.is_visible() and editor2.is_visible(), (
         "both sessions must render the document concurrently"
     )
 
+    # graceful unload BEFORE closing: an abrupt close with a live editor
+    # wedges the folder's reva id-cache for minutes (late async save)
+    from conftest import _graceful_editor_unload, close_editor
+    _graceful_editor_unload(p1)
+    _graceful_editor_unload(p2)
+    try:
+        close_editor(p1, run_id, file_path=path)
+    except Exception as e:
+        print(f"multisession teardown: {e}", flush=True)
     ctx2.close()
     dav_delete(path)

@@ -236,3 +236,28 @@ def test_export_unknown_format_rejected(client):
     res = _export(client, "doc1", "png")
     assert res.status_code == 400, res.text
     assert "unsupported format" in res.text
+
+
+def test_import_docx_endpoint(client):
+    """Insert > Text from File host path: an uploaded DOCX comes back as an
+    HTML fragment, ready to splice at the caret. No store mutation."""
+    data = _docx_bytes()
+    res = client.post(
+        "/api/documents/tf1/import-docx",
+        files={"file": ("clipping.docx", data, "application/vnd.openxmlformats-officedocument.wordprocessingml.document")},
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert BODY_TEXT in body["html"]
+    assert "clipping.docx" in body["name"]
+    # The endpoint must not have created a document record.
+    assert client.get("/api/documents/tf1").status_code == 404
+
+
+def test_import_docx_empty_rejected(client):
+    res = client.post(
+        "/api/documents/tf1/import-docx",
+        files={"file": ("empty.docx", b"", "application/octet-stream")},
+    )
+    assert res.status_code == 400
+    assert res.json()["error"] == "empty file"

@@ -1,6 +1,6 @@
 """Editor-opening tests: every office type must open an editor via the GUI.
 
-docx opens the World-Office WASM canvas directly (hard requirement).
+docx opens the WorldOffice editor surface directly (hard requirement).
 odt is advertised in WOPI discovery but the GUI currently shows an
 "open with" bar — tracked as an app-registration gap (xfail).
 ods/odp are not advertised at all — OnlyOffice parity gap (xfail).
@@ -38,7 +38,7 @@ def _assert_any_surface(page, name):
 def _assert_wopi_editor(page):
     fr = editor_frame(page)
     assert fr is not None, "editor iframe did not load"
-    assert fr.locator("canvas").count() >= 1, "no canvas inside the WOPI editor"
+    assert fr.locator("#editor").count() >= 1, "no editing surface inside the WOPI editor"
 
 
 def _create_via_gui(page, ext: str, label: str, name: str):
@@ -60,8 +60,8 @@ def test_open_docx_word_editor(in_run_folder, run_id):
     in_run_folder.wait_for_timeout(3000)
     open_file_by_name(in_run_folder, name)
     _assert_wopi_editor(in_run_folder)
-    fr, canvas = editor_canvas(in_run_folder)
-    assert canvas.is_visible(), "word editor canvas not visible"
+    _fr, editor = editor_canvas(in_run_folder)
+    assert editor.is_visible(), "word editor surface not visible"
     dav_delete(f"{run_id}/{name}")
 
 

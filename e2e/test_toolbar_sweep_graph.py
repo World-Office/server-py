@@ -1,7 +1,9 @@
 """Graph-driven toolbar sweep (button sweep 2.0).
 
-Walks the toolbar surfaces from scripts/harness-graph/graph.json (the
-projection of features.yaml + the editor sources) and asserts — against the
+Walks the toolbar surfaces from the wo-test-harness repo's
+harness-graph/graph.json (the projection of features.yaml + the editor
+sources, resolved via WO_HARNESS_GRAPH or a sibling checkout) and asserts —
+against the
 LIVE editor — that:
 
 1. every registered ``toolbar:{cmd}`` surface exists in the editor iframe,
@@ -17,6 +19,7 @@ feature register: F-010 F-011 F-012 F-013 F-014 F-015 F-016 F-017 F-018 F-030 F-
 from __future__ import annotations
 
 import json
+import os
 import random
 import time
 from pathlib import Path
@@ -33,9 +36,37 @@ from conftest import (
     open_file_by_name,
 )
 
-GRAPH = (
-    Path(__file__).resolve().parents[2] / "scripts" / "harness-graph" / "graph.json"
-)
+def _find_graph() -> Path:
+    """Locate harness-graph graph.json (register moved to wo-test-harness)."""
+    env = os.environ.get("WO_HARNESS_GRAPH")
+    if env:
+        p = Path(env)
+        if p.is_file():
+            return p
+        raise SystemExit(f"WO_HARNESS_GRAPH={env} is not a file")
+    here = Path(__file__).resolve()
+    # CI checks wo-test-harness out inside the server workspace; locally it is
+    # a sibling of the checkout parent. Accept both, then legacy in-repo.
+    candidates = [
+        # CI (docserver.yml) checks wo-test-harness out INSIDE the server
+        # workspace: $GITHUB_WORKSPACE/wo-test-harness == parents[2]/wo-test-harness.
+        here.parents[2] / "wo-test-harness" / "harness-graph" / "graph.json",
+        # Local dev checkout: harness is a sibling of the server checkout
+        # (~/git/World-Office/wo-test-harness next to ~/git/World-Office/server).
+        here.parents[3] / "wo-test-harness" / "harness-graph" / "graph.json",
+        # Legacy in-repo path (pre-move).
+        here.parents[2] / "scripts" / "harness-graph" / "graph.json",
+    ]
+    for c in candidates:
+        if c.is_file():
+            return c
+    raise SystemExit(
+        "harness graph not found: set WO_HARNESS_GRAPH to the wo-test-harness "
+        "harness-graph/graph.json path"
+    )
+
+
+GRAPH = _find_graph()
 
 
 def _graph_toolbar_commands() -> set[str]:

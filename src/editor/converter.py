@@ -12,7 +12,9 @@ from __future__ import annotations
 
 import base64
 import io
+import json
 import logging
+import math
 import re
 from html import escape
 from html.parser import HTMLParser
@@ -24,6 +26,7 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_BREAK
 from docx.opc.constants import CONTENT_TYPE as CT
 from docx.opc.constants import RELATIONSHIP_TYPE as RT
 from docx.opc.packuri import PackURI
+from docx.opc.part import Part
 from docx.oxml import OxmlElement
 from docx.oxml.ns import nsmap as _OXML_NSMAP
 from docx.oxml.ns import qn
@@ -33,6 +36,13 @@ from docx.shared import Emu, Pt, RGBColor
 from docx.table import _Cell
 from docx.text.paragraph import Paragraph
 from docx.text.run import Run
+
+# Field codes the editor round-trips as live Word fields (w:fldSimple). The
+# cached value renders immediately; Word re-computes on open/print.
+_FIELD_INSTRS = frozenset({
+    "PAGE", "NUMPAGES", "SECTIONPAGES", "DATE", "TIME", "AUTHOR",
+    "FILENAME", "WORDS", "CHARS", "USERNAME", "LASTSAVEDBY",
+})
 
 # WordprocessingShape namespace (not in python-docx's qn map).
 _OXML_NSMAP["wps"] = "http://schemas.microsoft.com/office/word/2010/wordprocessingShape"
@@ -806,6 +816,11 @@ def _docx_to_html(data: bytes) -> str:
         m = re.match(r"^<li[^>]*>(.*)</li>\s*$", frag, re.S)
         return m.group(1) if m else frag
 
+    # Watermark extraction must run BEFORE header_html: it may strip a
+    # watermark paragraph from the header part (the doc is from bytes, so
+    # mutating it here is safe).
+    wm_marker = _watermark_marker_from_docx(doc)
+
     # Extract header content if present
     header_html = ""
     header_part = _find_header_part(doc)
@@ -857,8 +872,14 @@ def _docx_to_html(data: bytes) -> str:
     for table in doc.tables:
         parts.append(_table_to_html(table, notes))
 
-    # Build the final HTML with header/footer
-    html_parts = []
+    # Build the final HTML with header/footer. Section flag markers
+    # (hyphenation / line numbers / watermark) ride at body start, before
+    # the header, in the fixed order html_to_docx strips them in.
+    html_parts = [p for p in [
+        _page_setup_marker_from_docx(doc),
+        _section_flags_marker_from_docx(doc),
+        wm_marker,
+    ] if p]
     if header_html:
         html_parts.append(f'<header class="page-header">{header_html}</header>')
     html_parts.extend(parts)
@@ -1035,6 +1056,11 @@ def _add_object(doc, typ: str, label: str, content: str) -> None:
     text content in ``wps:txbxContent``, so docx_to_html can recover a
     <div class="object" data-type="..."> marker on the way back.
     """
+    # Equations render as real OMML (editable in Word) rather than a shape.
+    if typ == "equation":
+        p = doc.add_paragraph()
+        _add_omml_equation(p, content, label)
+        return
     p = doc.add_paragraph()
     drawing = OxmlElement("w:drawing")
     inline = OxmlElement("wp:inline")
@@ -1131,9 +1157,544 @@ def _docx_chart_label(drawing) -> str:
     return "Chart"
 
 
+# ---------------------------------------------------------------------------
+# DrawingML chart engine (hand-rolled — no external chart library).
+#
+# Insert > Chart imgs (data-kind="chart" + JSON data-spec) become real chart
+# OPC parts (word/charts/chartN.xml) referenced from the w:drawing, so the
+# exported DOCX has a data-editable chart in Word/LibreOffice. Reading back,
+# the part is parsed into the same spec and re-emitted as an editable
+# vector-object img on reload.
+# ---------------------------------------------------------------------------
+
+_W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+_WP_NS = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+_A_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
+_C_NS = "http://schemas.openxmlformats.org/drawingml/2006/chart"
+_R_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+_M_NS = "http://schemas.openxmlformats.org/officeDocument/2006/math"
+_CHART_URI = "http://schemas.openxmlformats.org/drawingml/2006/chart"
+
+
+def _chart_num(v: float) -> str:
+    """Shortest decimal repr without exponent noise (1 -> "1", 2.5 -> "2.5")."""
+    return "%.12g" % v
+
+
+def _chart_spec_rows(spec: dict) -> list[list]:
+    rows = []
+    for r in spec.get("rows") or []:
+        if not isinstance(r, (list, tuple)) or len(r) < 2:
+            continue
+        try:
+            v = float(r[1] or 0)
+        except (TypeError, ValueError):
+            v = 0.0
+        rows.append([str(r[0]), v])
+    return rows or [["", 0.0]]
+
+
+def _chart_space_xml(spec: dict) -> str:
+    """ChartSpace XML for a single-series bar/line/pie/area chart."""
+    ctype = (spec.get("type") or "bar").strip().lower()
+    if ctype not in ("bar", "line", "pie", "area"):
+        ctype = "bar"
+    title = (spec.get("title") or "").strip()
+    rows = _chart_spec_rows(spec)
+    n = len(rows)
+    cats = "".join(
+        f'<c:pt idx="{i}"><c:v>{escape(str(l), quote=True)}</c:v></c:pt>'
+        for i, (l, _) in enumerate(rows)
+    )
+    nums = "".join(
+        f'<c:pt idx="{i}"><c:v>{_chart_num(v)}</c:v></c:pt>'
+        for i, (_, v) in enumerate(rows)
+    )
+    cat_ref = f"Sheet1!$A$2:$A${n + 1}"
+    val_ref = f"Sheet1!$B$2:$B${n + 1}"
+    ser = (
+        '<c:ser><c:idx val="0"/><c:order val="0"/>'
+        '<c:tx><c:strRef><c:f>Sheet1!$A$1</c:f><c:strCache><c:ptCount val="1"/>'
+        '<c:pt idx="0"><c:v>Series1</c:v></c:pt></c:strCache></c:strRef></c:tx>'
+        f'<c:cat><c:strRef><c:f>{cat_ref}</c:f><c:strCache><c:ptCount val="{n}"/>'
+        f'{cats}</c:strCache></c:strRef></c:cat>'
+        f'<c:val><c:numRef><c:f>{val_ref}</c:f><c:numCache><c:formatCode>General</c:formatCode>'
+        f'<c:ptCount val="{n}"/>{nums}</c:numCache></c:numRef></c:val>'
+        "</c:ser>"
+    )
+    val_ax = (
+        '<c:valAx><c:axId val="50000002"/><c:scaling><c:orientation val="minMax"/></c:scaling>'
+        '<c:delete val="0"/><c:axPos val="l"/><c:majorGridlines/><c:title/>'
+        '<c:numFmt formatCode="General" sourceLinked="0"/><c:crossAx val="50000001"/>'
+        '<c:crosses val="autoZero"/></c:valAx>'
+    )
+    cat_ax = (
+        '<c:catAx><c:axId val="50000001"/><c:scaling><c:orientation val="minMax"/></c:scaling>'
+        '<c:delete val="0"/><c:axPos val="b"/><c:title/>'
+        '<c:numFmt formatCode="General" sourceLinked="0"/><c:crossAx val="50000002"/>'
+        '<c:crosses val="autoZero"/></c:catAx>'
+    )
+    if ctype == "pie":
+        chart_el = (
+            '<c:pieChart><c:varyColors val="1"/>' + ser
+            + '<c:firstSliceAng val="0"/></c:pieChart>'
+        )
+        axis_xml = ""
+    elif ctype == "line":
+        chart_el = (
+            '<c:lineChart><c:grouping val="standard"/><c:varyColors val="0"/>' + ser
+            + '<c:marker val="1"/><c:axId val="50000001"/><c:axId val="50000002"/></c:lineChart>'
+        )
+        axis_xml = val_ax + cat_ax
+    elif ctype == "area":
+        chart_el = (
+            '<c:areaChart><c:grouping val="standard"/><c:varyColors val="0"/>' + ser
+            + '<c:axId val="50000001"/><c:axId val="50000002"/></c:areaChart>'
+        )
+        axis_xml = val_ax + cat_ax
+    else:
+        chart_el = (
+            '<c:barChart><c:barDir val="col"/><c:grouping val="clustered"/>'
+            '<c:varyColors val="0"/>' + ser
+            + '<c:axId val="50000001"/><c:axId val="50000002"/></c:barChart>'
+        )
+        axis_xml = val_ax + cat_ax
+    if title:
+        ttl = (
+            '<c:title><c:tx><c:rich><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>'
+            f"{escape(title, quote=True)}</a:t></a:r></a:p></c:rich></c:tx>"
+            '<c:overlay val="0"/></c:title><c:autoTitleDeleted val="0"/>'
+        )
+    else:
+        ttl = '<c:autoTitleDeleted val="1"/>'
+    return (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        f'<c:chartSpace xmlns:c="{_C_NS}" xmlns:a="{_A_NS}" xmlns:r="{_R_NS}">'
+        f'<c:lang val="en-US"/><c:chart>{ttl}<c:plotArea><c:layout/>'
+        f'{chart_el}{axis_xml}</c:plotArea><c:plotVisOnly val="1"/></c:chart></c:chartSpace>'
+    )
+
+
+def _chart_space_docxml(chart_xml: bytes) -> object:
+    return parse_xml(chart_xml)
+
+
+def _new_chart_part(doc_part, chart_xml: bytes, index: int):
+    """Create + register a chart OPC part, returning its rId."""
+    partname = PackURI(f"/word/charts/chart{index}.xml")
+    part = Part(partname, CT.DML_CHART, chart_xml, doc_part.package)
+    return doc_part.relate_to(part, RT.CHART)
+
+
+def _chart_drawing_xml(r_id: str, width_px: int, height_px: int, docpr_id: int) -> str:
+    """Inline w:drawing referencing the chart part (chart graphicData)."""
+    return (
+        f'<w:drawing xmlns:w="{_W_NS}" xmlns:wp="{_WP_NS}" xmlns:a="{_A_NS}" xmlns:r="{_R_NS}">'
+        '<wp:inline distT="0" distB="0" distL="0" distR="0">'
+        f'<wp:extent cx="{width_px * _EMU_PER_PX}" cy="{height_px * _EMU_PER_PX}"/>'
+        '<wp:effectExtent l="0" t="0" r="0" b="0"/>'
+        f'<wp:docPr id="{docpr_id}" name="Chart{docpr_id}" descr="chart"/>'
+        f'<a:graphic><a:graphicData uri="{_CHART_URI}"><c:chart xmlns:c="{_C_NS}" r:id="{r_id}"/>'
+        '</a:graphicData></a:graphic></wp:inline></w:drawing>'
+    )
+
+
+def _add_chart_drawing(paragraph, spec: dict) -> None:
+    """Embed the chart spec as a real DrawingML chart part + drawing."""
+    doc_part = paragraph.part
+    existing = [
+        rel for rel in doc_part.rels.values()
+        if rel.reltype == RT.CHART and not rel.is_external
+    ]
+    index = len([r for r in existing if getattr(r, "target_ref", "").endswith(".xml")]) + 1
+    r_id = _new_chart_part(doc_part, _chart_space_xml(spec).encode("utf-8"), index)
+    width = int(float(spec.get("width") or 420))
+    height = max(40, int(width * 260 / 440))
+    docpr_id = index + 3
+    run = paragraph.add_run()
+    run._r.append(parse_xml(_chart_drawing_xml(r_id, width, height, docpr_id)))
+
+
+def _chart_spec_from_part(root) -> dict | None:
+    """Parse a ChartSpace part back into {type, title, rows}."""
+    chart = next(root.iter(qn("c:chart")), None)
+    if chart is None:
+        return None
+    plot = next(chart.iter(qn("c:plotArea")), None)
+    if plot is None:
+        return None
+    ctype = None
+    for tag, t in (("c:pieChart", "pie"), ("c:lineChart", "line"),
+                   ("c:areaChart", "area"), ("c:barChart", "bar")):
+        if plot.find(qn(tag)) is not None:
+            ctype = t
+            break
+    if ctype is None:
+        return None
+
+    def _cache_pts(holder) -> list[str]:
+        if holder is None:
+            return []
+        # c:strCache/c:numCache live one level down (under c:strRef/c:numRef).
+        cache = next(holder.iter(qn("c:strCache")), None)
+        if cache is None:
+            cache = next(holder.iter(qn("c:numCache")), None)
+        if cache is None:
+            return []
+        out = []
+        for pt in cache.findall(qn("c:pt")):
+            v = pt.find(qn("c:v"))
+            out.append((v.text or "") if v is not None else "")
+        return out
+
+    ser = next(plot.iter(qn("c:ser")), None)
+    cats: list[str] = []
+    vals: list[float] = []
+    if ser is not None:
+        cats = _cache_pts(ser.find(qn("c:cat")))
+        try:
+            vals = [float(x) for x in _cache_pts(ser.find(qn("c:val")))]
+        except ValueError:
+            vals = []
+    rows = [[cats[i] if i < len(cats) else "", vals[i] if i < len(vals) else 0.0]
+            for i in range(max(len(cats), len(vals)))]
+    ttl = next(chart.iter(qn("a:t")), None)
+    title = (ttl.text or "") if ttl is not None else ""
+    return {"type": ctype, "title": title, "rows": rows}
+
+
+def _chart_svg(spec: dict, width_px: int) -> str:
+    """Server-side SVG preview (kept in sync with web/editor.js chartSVG)."""
+    ctype = (spec.get("type") or "bar").strip().lower()
+    if ctype not in ("bar", "line", "pie", "area"):
+        ctype = "bar"
+    title = (spec.get("title") or "").strip()
+    rows = _chart_spec_rows(spec)
+    W, H = 440, 260
+    hh = float(int(H * 0.72))
+    colors = ["#4f81bd", "#c0504d", "#9bbb59", "#8064a2", "#f79646", "#2d9cdb"]
+    elems = []
+    if ctype == "pie":
+        tot = sum(v for _, v in rows) or 1.0
+        cx, cy, r = 160, 130, 95
+        ang = -90.0
+        for i, (_, v) in enumerate(rows):
+            a2 = ang + 360.0 * (v / tot)
+            x1 = cx + r * math.cos(math.radians(ang)); y1 = cy + r * math.sin(math.radians(ang))
+            x2 = cx + r * math.cos(math.radians(a2)); y2 = cy + r * math.sin(math.radians(a2))
+            large = 1 if (a2 - ang) > 180 else 0
+            elems.append(
+                f'<path d="M{cx:.1f},{cy:.1f} L{x1:.1f},{y1:.1f} A{r},{r} 0 {large} 1 {x2:.1f},{y2:.1f} Z" '
+                f'fill="{colors[i % len(colors)]}" stroke="#fff" stroke-width="1"/>'
+            )
+            ang = a2
+    else:
+        vals = [v for _, v in rows]
+        vmax = max([abs(v) for v in vals] + [1.0])
+        pad_l, pad_b = 46, 34
+        ax, bx = pad_l, W - 12
+        ay, by = 12, H - pad_b
+        n = max(len(rows), 1)
+        slot = (bx - ax) / n
+        for i, (_, v) in enumerate(rows):
+            hh2 = abs(v) / vmax * (by - ay)
+            yy = by - hh2 if v >= 0 else by
+            x = ax + slot * i + slot * 0.18
+            w = slot * 0.64
+            if ctype == "bar":
+                elems.append(
+                    f'<rect x="{x:.1f}" y="{yy:.1f}" width="{w:.1f}" height="{max(hh2, 1):.1f}" '
+                    f'rx="2" fill="{colors[i % len(colors)]}"/>'
+                )
+            else:
+                px = x + w / 2
+                py = max(yy + 2 if hh2 < 3 else yy, ay)
+                elems.append(
+                    f'<line x1="{px:.1f}" y1="{by:.1f}" x2="{px:.1f}" y2="{py:.1f}" '
+                    f'stroke="{colors[i % len(colors)]}" stroke-width="2"/>'
+                )
+                elems.append(
+                    f'<circle cx="{px:.1f}" cy="{py:.1f}" r="3" fill="{colors[i % len(colors)]}"/>'
+                )
+        for k in range(0, 5):
+            gy = ay + (by - ay) * k / 4
+            elems.append(f'<line x1="{ax:.1f}" y1="{gy:.1f}" x2="{bx:.1f}" y2="{gy:.1f}" '
+                         'stroke="#e4e7eb" stroke-width="1"/>')
+        elems.append(f'<line x1="{ax:.1f}" y1="{by:.1f}" x2="{bx:.1f}" y2="{by:.1f}" '
+                     'stroke="#333" stroke-width="1.4"/>')
+        for i, (lbl, _) in enumerate(rows):
+            elems.append(
+                f'<text x="{ax + slot * i + slot / 2:.1f}" y="{H - 8:.1f}" '
+                f'font-size="10" text-anchor="middle" font-family="sans-serif">'
+                f'{escape(lbl[:12], quote=True)}</text>'
+            )
+    if title:
+        elems.append(
+            f'<text x="{W / 2:.1f}" y="20" font-size="13" font-weight="bold" '
+            'text-anchor="middle" font-family="sans-serif">' + escape(title, quote=True) + '</text>'
+        )
+    return (
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W} {H}" '
+        f'width="{width_px}" height="{int(width_px * H / W)}" >'
+        + "".join(elems) + "</svg>"
+    )
+
+
+def _docx_chart_to_img(run, drawing) -> str | None:
+    """A w:drawing carrying a chart part -> editable vector-object img."""
+    chart = next(drawing.iter(qn("c:chart")), None)
+    if chart is None:
+        return None
+    r_id = chart.get(qn("r:id"))
+    rel = None
+    if r_id:
+        rel = next((r for r in run.part.rels.values() if r.rId == r_id), None)
+    if rel is None or rel.is_external:
+        return None
+    try:
+        root = parse_xml(rel.target_part.blob)
+        spec = _chart_spec_from_part(root)
+    except Exception:
+        return None
+    if spec is None:
+        return None
+    width = 420
+    spec = {**spec, "width": width}
+    spec_json = json.dumps(spec)
+    svg_b64 = base64.b64encode(_chart_svg(spec, width).encode("utf-8")).decode("ascii")
+    return (
+        f'<img class="vector-object" data-kind="chart" '
+        f'data-spec="{escape(spec_json, quote=True)}" '
+        f'src="data:image/svg+xml;base64,{svg_b64}" width="{width}" '
+        f'alt="__wo-chart__{escape(spec_json, quote=True)}"/>'
+    )
+
+
+# ---------------------------------------------------------------------------
+# OMML equation engine (hand-rolled linear -> MathML-in-DOCX). Insert >
+# Equation imgs and <div class="object" data-type="equation"> markers become
+# m:oMath runs, so Word/LibreOffice edit them as real equations.
+# ---------------------------------------------------------------------------
+
+
+def _omml_plain(text: str) -> str:
+    return f'<m:r><m:t xml:space="preserve">{escape(text, quote=True)}</m:t></m:r>'
+
+
+def _linear_to_omml(text: str) -> str:
+    """Linear notation (e.g. 'x^2 + a/b - sqrt(2)') -> OMML m:oMath XML.
+
+    Whitespace around operators/fractions is ignored so 'a / b' behaves like
+    'a/b'; superscripts/subscripts via ^ and _, sqrt(x) becomes an m:rad."""
+    src = text or ""
+    pos = 0
+
+    def skip_ws() -> None:
+        nonlocal pos
+        while pos < len(src) and src[pos].isspace():
+            pos += 1
+
+    def parse_expr() -> str:
+        nonlocal pos
+        parts = []
+        while True:
+            skip_ws()
+            if pos >= len(src) or src[pos] in "()}]":
+                break
+            ch = src[pos]
+            if ch in "+-=*":
+                pos += 1
+                parts.append(_omml_plain(ch))
+            else:
+                parts.append(parse_term())
+        return "".join(parts) or _omml_plain("")
+
+    def parse_term() -> str:
+        nonlocal pos
+        left = parse_factor()
+        save = pos
+        skip_ws()
+        if pos < len(src) and src[pos] == "/":
+            pos += 1
+            right = parse_factor()
+            return f"<m:f><m:num>{left}</m:num><m:den>{right}</m:den></m:f>"
+        pos = save
+        return left
+
+    def parse_factor() -> str:
+        nonlocal pos
+        skip_ws()
+        atom = parse_atom()
+        while True:
+            save = pos
+            skip_ws()
+            if pos < len(src) and src[pos] in "^_":
+                op = src[pos]
+                pos += 1
+                arg = parse_atom()
+                if op == "^":
+                    atom = f"<m:sSup><m:e>{atom}</m:e><m:sup>{arg}</m:sup></m:sSup>"
+                else:
+                    atom = f"<m:sSub><m:e>{atom}</m:e><m:sub>{arg}</m:sub></m:sSub>"
+            else:
+                pos = save
+                break
+        return atom
+
+    def parse_atom() -> str:
+        nonlocal pos
+        skip_ws()
+        if pos >= len(src):
+            return _omml_plain("")
+        ch = src[pos]
+        if ch == "(":
+            pos += 1
+            inner = parse_expr()
+            if pos < len(src) and src[pos] == ")":
+                pos += 1
+            return (
+                '<m:d><m:dPr><m:begChr val="("/><m:endChr val=")"/></m:dPr>'
+                f"<m:e>{inner}</m:e></m:d>"
+            )
+        if ch == "{":
+            pos += 1
+            inner = parse_expr()
+            if pos < len(src) and src[pos] == "}":
+                pos += 1
+            return inner
+        if src.startswith("sqrt(", pos):
+            pos += 5
+            inner = parse_expr()
+            if pos < len(src) and src[pos] == ")":
+                pos += 1
+            return (
+                '<m:rad><m:radPr><m:degHide val="1"/></m:radPr><m:deg/>'
+                f"<m:e>{inner}</m:e></m:rad>"
+            )
+        ch = src[pos]
+        pos += 1
+        while pos < len(src) and re.match(r"[A-Za-z0-9.\u0391-\u03C9]", src[pos]):
+            ch += src[pos]
+            pos += 1
+        return _omml_plain(ch)
+
+    return f'<m:oMath xmlns:m="{_M_NS}">{parse_expr()}</m:oMath>'
+
+
+def _add_omml_equation(paragraph, text: str, label: str = "") -> None:
+    """Emit a display equation: m:oMathPara DIRECTLY on w:p (m:oMath inside
+    w:r is schema-invalid — Word/LibreOffice silently drop it).
+
+    An optional label wraps the OMML in a Word bookmark, so the
+    data-label marker survives the round-trip too (F086 contract)."""
+    omml = _linear_to_omml(text)
+    omml = omml.replace(
+        "<m:oMath ",
+        f'<m:oMathPara xmlns:m="{_M_NS}"><m:oMath ',
+        1,
+    ) + "</m:oMathPara>"
+    if label:
+        bid = _next_bookmark_id(paragraph.part)
+        bm_start = OxmlElement("w:bookmarkStart")
+        bm_start.set(qn("w:id"), str(bid))
+        bm_start.set(qn("w:name"), label[:40])
+        bm_end = OxmlElement("w:bookmarkEnd")
+        bm_end.set(qn("w:id"), str(bid))
+        paragraph._p.append(bm_start)
+        paragraph._p.append(parse_xml(omml))
+        paragraph._p.append(bm_end)
+    else:
+        paragraph._p.append(parse_xml(omml))
+
+
+
 def _docx_equation_text(node) -> str:
     return "".join(
         t.text or "" for t in node.iter() if t.tag in (qn("w:t"), qn("m:t"))
+    )
+
+
+def _omml_linear(node) -> str:
+    """Reconstruct linear notation from an OMML subtree, so equations read
+    back exactly as typed ('E=mc^2' stays 'E=mc^2', not flattened 'E=mc2')."""
+    if node is None:
+        return ""
+    tag = node.tag
+    if tag == qn("m:t"):
+        return node.text or ""
+    if tag == qn("m:sSup"):
+        return f"{_omml_linear(node.find(qn('m:e')))}^{_omml_linear(node.find(qn('m:sup')))}"
+    if tag == qn("m:sSub"):
+        return f"{_omml_linear(node.find(qn('m:e')))}_{_omml_linear(node.find(qn('m:sub')))}"
+    if tag == qn("m:f"):
+        return f"{_omml_linear(node.find(qn('m:num')))}/{_omml_linear(node.find(qn('m:den')))}"
+    if tag == qn("m:rad"):
+        return f"sqrt({_omml_linear(node.find(qn('m:e')))})"
+    if tag == qn("m:d"):
+        return f"({_omml_linear(node.find(qn('m:e')))})"
+    return "".join(_omml_linear(c) for c in node)
+
+
+
+def _equation_svg(expr: str) -> str:
+    """Server-side SVG preview for a linear equation (kept in sync with
+    web/editor.js equationSVG: ^ superscript, _ subscript, ** center dot)."""
+    tokens = re.sub(r"\s+", " ", expr or "").strip()
+    w = max(140, len(tokens) * 13 + 40)
+    h = 76
+    body = []
+    x = 12
+
+    def push(txt: str, size: int, dy: int) -> None:
+        nonlocal x
+        body.append(
+            f'<text x="{x}" y="{42 + dy}" font-size="{size}" '
+            f'font-family="serif" font-style="italic">{escape(txt)}</text>'
+        )
+        x += len(txt) * (size * 0.62) + 1
+
+    i = 0
+    while i < len(tokens):
+        ch = tokens[i]
+        if ch in "^_":
+            j, run = i + 1, ""
+            if j < len(tokens) and tokens[j] == "{":
+                j += 1
+                while j < len(tokens) and tokens[j] != "}":
+                    run += tokens[j]; j += 1
+                i = j + 1
+            else:
+                run = tokens[j] if j < len(tokens) else ""
+                i = j + 1
+            push(run, 13, -12 if ch == "^" else 10)
+        elif ch == "*" and i + 1 < len(tokens) and tokens[i + 1] == "*":
+            body.append(f'<circle cx="{x + 4}" cy="38" r="1.4" fill="currentColor"/>')
+            x += 10
+            i += 2
+        else:
+            push(ch, 18, 0)
+            i += 1
+    return (
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" '
+        f'viewBox="0 0 {w} {h}"><rect width="100%" height="100%" fill="#ffffff"/>'
+        + "".join(body) + "</svg>"
+    )
+
+
+def _equation_vector_img(text: str, label: str = "") -> str:
+    """The editable vector-object img contract for equations (mirrors the
+    chart readback), so reloaded documents keep crisp, double-click-editable
+    equations instead of degrading to a text marker."""
+    spec = {"text": text, "width": 260}
+    if label:
+        spec["label"] = label
+    spec_json = json.dumps(spec)
+    svg_b64 = base64.b64encode(_equation_svg(text).encode("utf-8")).decode("ascii")
+    return (
+        f'<img class="vector-object" data-kind="equation" '
+        f'data-spec="{escape(spec_json, quote=True)}" '
+        f'src="data:image/svg+xml;base64,{svg_b64}" width="260" '
+        f'alt="__wo-equation__{escape(spec_json, quote=True)}"/>'
     )
 
 
@@ -1147,10 +1708,22 @@ def _add_header(doc, content_html: str) -> None:
     header = section.header
     header_para = header.paragraphs[0]
 
+    # bare text (typing into the header div leaves no <p> wrapper) still
+    # needs a run — wrap it so the paragraph loop below emits it
+    if "<p" not in content_html.lower():
+        content_html = f"<p>{content_html}</p>"
     # Parse the header content and add runs
     # Each <p> becomes a paragraph in the header
     for p_match in re.finditer(r'<p([^>]*)>(.*?)</p>', content_html, re.S | re.I):
+        p_attrs = p_match.group(1)
         p_inner = p_match.group(2)
+
+        # Paragraph alignment (the watermark fold emits text-align:center).
+        pst = re.search(r'style="([^"]*)"', p_attrs)
+        if pst and "text-align:center" in pst.group(1):
+            jc = OxmlElement("w:jc")
+            jc.set(qn("w:val"), "center")
+            header_para._p.get_or_add_pPr().append(jc)
 
         # Add the paragraph with header style
         # Create a run with the header text and any page number fields
@@ -1174,6 +1747,9 @@ def _add_footer(doc, content_html: str) -> None:
     footer = section.footer
     footer_para = footer.paragraphs[0]
 
+    # bare text (typing into the footer div) still needs a run — wrap it
+    if "<p" not in content_html.lower():
+        content_html = f"<p>{content_html}</p>"
     # Parse the footer content and add runs
     for p_match in re.finditer(r'<p([^>]*)>(.*?)</p>', content_html, re.S | re.I):
         p_inner = p_match.group(2)
@@ -1189,11 +1765,44 @@ def _add_footer(doc, content_html: str) -> None:
 def _add_header_footer_runs_to_paragraph(para, content_html: str) -> None:
     """Add runs to a header/footer paragraph from HTML content.
 
-    Handles page number fields (<span class="page-number">) specially.
+    Handles page number fields (<span class="page-number">) specially and
+    applies inline ``<span style="font-size/color/font-weight">`` styling
+    (the watermark fold depends on the run rPr signature).
     """
+    def _decorate(run, style: str) -> None:
+        rpr = run._r.get_or_add_rPr()
+        fsz = re.search(r"font-size:(\d+(?:\.\d+)?)pt", style)
+        if fsz:
+            sz = OxmlElement("w:sz")
+            sz.set(qn("w:val"), str(int(round(float(fsz.group(1)) * 2))))
+            rpr.append(sz)
+            szcs = OxmlElement("w:szCs")
+            szcs.set(qn("w:val"), str(int(round(float(fsz.group(1)) * 2))))
+            rpr.append(szcs)
+        col = re.search(r"color:#([0-9a-fA-F]{6})", style)
+        if col:
+            c = OxmlElement("w:color")
+            c.set(qn("w:val"), col.group(1).upper())
+            rpr.append(c)
+        if "font-weight:bold" in style:
+            rpr.append(OxmlElement("w:b"))
+            rpr.append(OxmlElement("w:bCs"))
+
     # Process the content, splitting into text and page-number markers
     pos = 0
     while pos < len(content_html):
+        # Check for a styled span (e.g. the watermark paragraph)
+        span_m = re.match(r'<span\s+style="([^"]*)"[^>]*>', content_html[pos:], re.I)
+        if span_m and ">" in content_html[pos:]:
+            text = span_m.group(0)
+            inner_start = pos + len(text)
+            inner_end = content_html.find("</span>", inner_start)
+            if inner_end != -1:
+                inner = content_html[inner_start:inner_end]
+                run = para.add_run(re.sub(r"<[^>]+>", "", inner))
+                _decorate(run, span_m.group(1))
+                pos = inner_end + len("</span>")
+                continue
         # Check for page number span
         pn_match = re.match(r'<span\s+class="page-number"[^>]*></span>', content_html[pos:], re.I | re.S)
         if pn_match:
@@ -1299,6 +1908,21 @@ def _para_style_parts(para) -> list[str]:
             styles.append("direction:rtl")
         if ppr.find(qn("w:pageBreakBefore")) is not None:
             styles.append("page-break-before:always")
+        pbdr = ppr.find(qn("w:pBdr"))
+        if pbdr is not None:
+            bcss: list[str] = []
+            for side in ("top", "left", "bottom", "right"):
+                el = pbdr.find(qn(f"w:{side}"))
+                if el is None:
+                    continue
+                sz = el.get(qn("w:sz"))
+                color = el.get(qn("w:color"))
+                if not sz or not color:
+                    continue
+                bcss.append(
+                    f"border-{side}:{int(sz) / 8:g}pt solid #{color.lower()}")
+            if bcss:
+                styles.append(";".join(bcss))
     except Exception:
         pass
     return styles
@@ -1318,6 +1942,21 @@ def _parse_len_pt(val: str) -> float | None:
     elif unit == "cm":
         num *= 28.3465
     return num
+
+
+_BORDER_RE = re.compile(
+    r"^\s*(\d+(?:\.\d+)?)\s*(pt|px)?\s*solid\s*#([0-9a-fA-F]{6})\s*$")
+
+
+def _normalize_border(val: str) -> str | None:
+    """'1.5pt solid #ff0000' / '2px solid #000' -> 'Npt solid #RRGGBB'."""
+    m = _BORDER_RE.match(val)
+    if not m:
+        return None
+    n = float(m.group(1))
+    if (m.group(2) or "pt") == "px":
+        n *= 0.75
+    return f"{n:g}pt solid #{m.group(3).lower()}"
 
 
 def _parse_para_props(open_tag: str) -> dict:
@@ -1353,7 +1992,92 @@ def _parse_para_props(open_tag: str) -> dict:
             props["page_break_before"] = True
         elif prop == "text-align" and val in ("center", "right"):
             props["text-align"] = val
+        elif prop == "border" or prop.startswith("border-"):
+            side = "all" if prop == "border" else prop.split("-", 1)[1]
+            if side not in ("top", "right", "bottom", "left", "all"):
+                continue
+            b = _normalize_border(val)
+            if b:
+                props.setdefault("borders", {})[side] = b
     return props
+
+
+def _apply_para_borders(p, borders: dict) -> None:
+    """Write w:pBdr from a {side: 'Npt solid #hex'} map (side 'all' fans out)."""
+    try:
+        ppr = p._p.get_or_add_pPr()
+    except Exception:
+        return
+    allb = borders.get("all")
+    pbdr = OxmlElement("w:pBdr")
+    for side in ("top", "left", "bottom", "right"):
+        val = borders.get(side) or allb
+        if not val:
+            continue
+        m = re.match(r"^(\d+(?:\.\d+)?)pt\s+solid\s+#([0-9a-fA-F]{6})$", val)
+        if not m:
+            continue
+        el = OxmlElement(f"w:{side}")
+        el.set(qn("w:val"), "single")
+        el.set(qn("w:sz"), str(int(round(float(m.group(1)) * 8))))
+        el.set(qn("w:space"), "0")
+        el.set(qn("w:color"), m.group(2).upper())
+        pbdr.append(el)
+    if not len(pbdr):
+        return
+    shd = ppr.find(qn("w:shd"))
+    tabs = ppr.find(qn("w:tabs"))
+    if shd is not None:
+        shd.addprevious(pbdr)
+    elif tabs is not None:
+        tabs.addprevious(pbdr)
+    else:
+        ppr.append(pbdr)
+
+
+def _set_dropcap(p) -> None:
+    """Mark a paragraph as a three-line drop cap (w:framePr w:dropCap)."""
+    try:
+        ppr = p._p.get_or_add_pPr()
+    except Exception:
+        return
+    fp = OxmlElement("w:framePr")
+    fp.set(qn("w:dropCap"), "drop")
+    fp.set(qn("w:lines"), "3")
+    fp.set(qn("w:wrap"), "around")
+    fp.set(qn("w:w"), "480")
+    fp.set(qn("w:h"), "480")
+    pstyle = ppr.find(qn("w:pStyle"))
+    if pstyle is not None:
+        pstyle.addnext(fp)
+    else:
+        ppr.insert(0, fp)
+
+
+_DROPCAP_SPAN_RE = re.compile(r'<span class="dropcap"[^>]*>([^<]*)</span>')
+
+
+def _strip_dropcap(p, inline_html: str) -> str:
+    """If *inline_html* starts with a dropcap span, apply framePr and
+    return the remaining runs; otherwise unchanged."""
+    m = _DROPCAP_SPAN_RE.match(inline_html)
+    if not m:
+        return inline_html
+    _set_dropcap(p)
+    # Keep the drop-cap letter as the paragraph's first text (Word keeps it
+    # in the body; framePr just makes it span the lines).
+    return m.group(1) + inline_html[m.end():]
+
+
+def _has_dropcap(para) -> bool:
+    try:
+        ppr = para._p.pPr
+    except Exception:
+        return False
+    if ppr is None:
+        return False
+    fp = ppr.find(qn("w:framePr"))
+    return fp is not None and (fp.get(qn("w:dropCap")) or "").lower() == "drop"
 
 
 def _apply_para_props(p, props: dict) -> None:
@@ -1387,6 +2111,8 @@ def _apply_para_props(p, props: dict) -> None:
             ppr.append(OxmlElement("w:pageBreakBefore"))
     except Exception:
         pass
+    if props.get("borders"):
+        _apply_para_borders(p, props["borders"])
 
 
 def _paragraph_to_html(para, notes=None, comments=None) -> tuple[str | None, str | None, int | None]:
@@ -1400,6 +2126,15 @@ def _paragraph_to_html(para, notes=None, comments=None) -> tuple[str | None, str
     """
     style = (para.style.name or "").lower()
     text = _paragraph_inline(para, notes, comments)
+
+    # Drop cap: a paragraph whose w:framePr carries w:dropCap wraps its
+    # first character in <span class="dropcap"> (the writer side strips
+    # the same wrapping on the way in).
+    if _has_dropcap(para) and text:
+        m = re.match(r"(?:<[^>]+>)*?([^\s<])", text)
+        if m:
+            text = (text[:m.start(1)] + '<span class="dropcap">'
+                    + m.group(1) + "</span>" + text[m.end(1):])
 
     # Horizontal rule: an empty paragraph with a bottom border renders as <hr/>.
     if _para_has_bottom_border(para) and not text.strip():
@@ -1527,6 +2262,58 @@ def _paragraph_inline(para, notes=None, comments=None) -> str:
             if href:
                 inner = f'<a href="{escape(href, quote=True)}">{inner}</a>'
             add(inner)
+        if tag in (qn("m:oMath"), qn("m:oMathPara")):
+            # paragraph-level equation (display equations are m:oMathPara
+            # children of w:p, not w:r) — emit the editable vector-object img
+            # (linear notation reconstructed; a wrapping bookmark carries the
+            # label, consumed here so it isn't re-emitted as a bookmark span).
+            label = ""
+            if in_bookmark is not None:
+                label = (in_bookmark[1] or "").strip()
+                in_bookmark = None
+            try:
+                out.append(_equation_vector_img(_omml_linear(child), label))
+            except Exception:
+                attrs = ' data-type="equation"'
+                if label:
+                    attrs += f' data-label="{escape(label, quote=True)}"'
+                out.append(f'<div class="object"{attrs}>{escape(_omml_linear(child))}</div>')
+            continue
+        if tag == qn("w:fldSimple"):
+            instr = (child.get(qn("w:instr")) or "").strip().upper()
+            if instr in _FIELD_INSTRS:
+                # p-level live field (the editor emits w:fldSimple as a
+                # paragraph child, like Word does). Render its cached value;
+                # data-field keeps the code for the next save.
+                text = "".join(t.text or "" for t in child.iter(qn("w:t")))
+                add(
+                    f'<span class="field" data-field="{escape(instr)}">'
+                    f"{escape(text)}</span>"
+                )
+            continue
+        elif tag == qn("w:sdt"):
+            # structured document tag (content control): emit the inline
+            # contract <span class="content-control" data-cc=.. title=..>
+            kind = "plain"
+            title = ""
+            sdtPr = child.find(qn("w:sdtPr"))
+            if sdtPr is not None:
+                tag_el = sdtPr.find(qn("w:tag"))
+                if tag_el is not None:
+                    kind = (tag_el.get(qn("w:val")) or "plain").strip()
+                alias_el = sdtPr.find(qn("w:alias"))
+                if alias_el is not None:
+                    title = alias_el.get(qn("w:val")) or ""
+            content = child.find(qn("w:sdtContent"))
+            if content is not None:
+                inner_runs = [Run(r, para) for r in content.findall(qn("w:r"))]
+                inner = _runs_to_html(inner_runs, notes)
+                escaped_title = escape(title)
+                add(
+                    f'<span class="content-control" data-cc="{escape(kind)}"'
+                    + (f' title="{escaped_title}"' if escaped_title else "")
+                    + f">{inner}</span>"
+                )
         elif tag == qn("w:r"):
             inner = _run_to_html(Run(child, para), notes)
             if in_comment is not None and child.find(qn("w:commentReference")) is not None:
@@ -1598,6 +2385,40 @@ def _run_to_html(run, notes=None) -> str:
                     chunks.append(_wrap_run_text(escape("".join(buf)), run))
                     buf = []
                 chunks.append(marker)
+        elif child.tag == qn("w:fldSimple"):
+            instr = child.get(qn("w:instr")) or ""
+            # Handle L1 field markers: CITATION and XE (index entry)
+            if instr.startswith("CITATION"):
+                # Extract the display text from the child w:t or from the instr
+                text = "".join(t.text or "" for t in child.iter(qn("w:t")))
+                if buf:
+                    chunks.append(_wrap_run_text(escape("".join(buf)), run))
+                    buf = []
+                if text:
+                    # Try to extract the citation number from the text
+                    m = re.match(r"^\s*\[?(\d+)\]?\s*$", text)
+                    citation_num = m.group(1) if m else "1"
+                    chunks.append(f'<sup class="ref-citation">{escape(text)}</sup>')
+            elif instr.startswith("XE"):
+                # Index entry field
+                text = "".join(t.text or "" for t in child.iter(qn("w:t")))
+                if buf:
+                    chunks.append(_wrap_run_text(escape("".join(buf)), run))
+                    buf = []
+                if text:
+                    chunks.append(f'<span class="ref-index">{escape(text)}</span>')
+            elif instr.strip().upper() in _FIELD_INSTRS:
+                # Editor-added live fields (PAGE/DATE/TIME/...). The cached
+                # display renders; the field code rides data-field so a save
+                # re-emits w:fldSimple (Word keeps recomputing it).
+                text = "".join(t.text or "" for t in child.iter(qn("w:t")))
+                if buf:
+                    chunks.append(_wrap_run_text(escape("".join(buf)), run))
+                    buf = []
+                chunks.append(
+                    f'<span class="field" data-field="{escape(instr.strip().upper())}">'
+                    f"{escape(text)}</span>"
+                )
         elif child.tag == qn("w:drawing"):
             img = _drawing_to_img(run, child)
             if img:
@@ -1606,6 +2427,13 @@ def _run_to_html(run, notes=None) -> str:
                     buf = []
                 chunks.append(img)
             else:
+                chart_img = _docx_chart_to_img(run, child)
+                if chart_img:
+                    if buf:
+                        chunks.append(_wrap_run_text(escape("".join(buf)), run))
+                        buf = []
+                    chunks.append(chart_img)
+                    continue
                 obj = _docx_drawing_object(child)
                 if obj:
                     if buf:
@@ -1616,10 +2444,13 @@ def _run_to_html(run, notes=None) -> str:
             if buf:
                 chunks.append(_wrap_run_text(escape("".join(buf)), run))
                 buf = []
-            chunks.append(
-                f'<div class="object" data-type="equation">'
-                f'{escape(_docx_equation_text(child))}</div>'
-            )
+            try:
+                chunks.append(_equation_vector_img(_omml_linear(child)))
+            except Exception:
+                chunks.append(
+                    f'<div class="object" data-type="equation">'
+                    f'{escape(_omml_linear(child))}</div>'
+                )
         elif child.tag in (qn("w:t"), qn("w:tab"), qn("w:br"), qn("w:cr")):
             buf.append(_text_child_value(child))
     if buf:
@@ -1941,6 +2772,24 @@ def _drawing_to_img(run, drawing) -> str:
         alt = _drawing_alt(drawing)
         if alt:
             attrs.append(f' alt="{escape(alt)}"')
+        anchor = drawing.find(qn("wp:anchor"))
+        if anchor is not None:
+            # anchored (floating) picture: carry the float classes so a save
+            # re-emits wp:anchor with the same text flow
+            cls = []
+            if anchor.find(qn("wp:wrapBehind")) is not None:
+                cls.append("obj-behind")
+            elif (anchor.find(qn("wp:wrapSquare")) is not None
+                  or anchor.find(qn("wp:wrapTight")) is not None
+                  or anchor.find(qn("wp:wrapThrough")) is not None):
+                cls.append("obj-square")
+            pos_h = anchor.find(qn("wp:positionH"))
+            if pos_h is not None:
+                align = pos_h.find(qn("wp:align"))
+                if align is not None and align.text == "right":
+                    cls.append("obj-right")
+            if cls:
+                attrs.append(f' class="{escape(" ".join(cls))}"')
         return "<img" + "".join(attrs) + "/>"
     return ""
 
@@ -2176,6 +3025,364 @@ class _TableParser(HTMLParser):
 _TAG_TABLE = re.compile(r"<figure>.*?</figure>|<table[^>]*>.*?</table>", re.S)
 
 
+# --------------------------------------------------------------------------
+# Page setup marker (F-090 page size / F-091 orientation / F-092 margins)
+# --------------------------------------------------------------------------
+# Document-level page geometry rides as an empty marker div at body start:
+#   <div class="page-setup" data-page-w="11906" data-page-h="16838"
+#        data-orient="landscape" data-margin-top="1134"
+#        data-margin-bottom="1134" data-margin-left="1417"
+#        data-margin-right="1417"></div>
+# All values are twips (twentieths of a point). docx_to_html emits it from
+# w:sectPr (w:pgSz + w:pgMar); html_to_docx applies it back. The ODT
+# converters map the same marker to style:page-layout-properties.
+
+_PAGE_SETUP_RE = re.compile(
+    r'\s*<div\s+class="page-setup"([^>]*)>\s*</div>', re.I)
+
+
+def _twips_attr(attrs: str, name: str) -> int | None:
+    m = re.search(rf'data-{name}\s*=\s*"?(-?\d+)', attrs)
+    return int(m.group(1)) if m else None
+
+
+def _page_setup_marker(w: int | None, h: int | None, orient: str | None,
+                       mt: int | None, mb: int | None,
+                       ml: int | None, mr: int | None) -> str:
+    """Build the marker div from twip values; None drops the attribute.
+    A marker with no attributes at all is not emitted."""
+    pairs = [("page-w", w), ("page-h", h), ("orient", orient),
+             ("margin-top", mt), ("margin-bottom", mb),
+             ("margin-left", ml), ("margin-right", mr)]
+    attrs = "".join(
+        f' data-{k}="{escape(str(v))}"' for k, v in pairs if v is not None)
+    if not attrs:
+        return ""
+    return f'<div class="page-setup"{attrs}></div>'
+
+
+def _page_setup_marker_from_docx(doc) -> str:
+    """Marker for the document's section page geometry — but ONLY when it
+    differs from python-docx's Letter defaults. Emitting a marker for every
+    default document would churn every exact-HTML assert in the corpus for
+    zero information; absence of the marker simply means 'the defaults'."""
+    try:
+        sec = doc.sections[0]
+        to_tw = lambda emu: int(round(int(emu) / 635)) if emu else None
+        vals = {
+            "w": to_tw(sec.page_width), "h": to_tw(sec.page_height),
+            "mt": to_tw(sec.top_margin), "mb": to_tw(sec.bottom_margin),
+            "ml": to_tw(sec.left_margin), "mr": to_tw(sec.right_margin),
+        }
+        defaults = _docx_default_geometry()
+        orient = None
+        if str(sec.orientation or "").upper().endswith("LANDSCAPE"):
+            orient = "landscape"
+        elif vals["w"] and vals["h"] and vals["w"] > vals["h"]:
+            orient = "landscape"
+        if not orient and all(vals[k] == defaults[k] for k in vals):
+            return ""
+        return _page_setup_marker(
+            vals["w"], vals["h"], orient,
+            vals["mt"], vals["mb"], vals["ml"], vals["mr"])
+    except Exception:
+        return ""
+
+
+_DOCX_DEFAULT_GEOMETRY: dict | None = None
+
+
+def _docx_default_geometry() -> dict:
+    """The python-docx template's section geometry in twips (cached)."""
+    global _DOCX_DEFAULT_GEOMETRY
+    if _DOCX_DEFAULT_GEOMETRY is None:
+        sec = Document().sections[0]
+        to_tw = lambda emu: int(round(int(emu) / 635)) if emu else None
+        _DOCX_DEFAULT_GEOMETRY = {
+            "w": to_tw(sec.page_width), "h": to_tw(sec.page_height),
+            "mt": to_tw(sec.top_margin), "mb": to_tw(sec.bottom_margin),
+            "ml": to_tw(sec.left_margin), "mr": to_tw(sec.right_margin),
+        }
+    return _DOCX_DEFAULT_GEOMETRY
+
+
+def _apply_page_setup_marker(attrs: str, section) -> None:
+    """Apply marker attributes to a python-docx section (twips -> EMU)."""
+    from docx.enum.section import WD_ORIENT
+
+    def emu(name):
+        tw = _twips_attr(attrs, name)
+        return Emu(tw * 635) if tw else None
+
+    if _twips_attr(attrs, "page-w"):
+        section.page_width = emu("page-w")
+    if _twips_attr(attrs, "page-h"):
+        section.page_height = emu("page-h")
+    om = re.search(r'data-orient\s*=\s*"?(landscape|portrait)', attrs, re.I)
+    if om:
+        section.orientation = (WD_ORIENT.LANDSCAPE if om.group(1).lower() == "landscape"
+                               else WD_ORIENT.PORTRAIT)
+    for attr, prop in (("margin-top", "top_margin"),
+                       ("margin-bottom", "bottom_margin"),
+                       ("margin-left", "left_margin"),
+                       ("margin-right", "right_margin")):
+        if _twips_attr(attrs, attr):
+            setattr(section, prop, emu(attr))
+
+
+# ── section flag markers (hyphenation / line numbers / watermark) ──────
+# Same doctrine as the page-setup marker: the marker rides at body start,
+# is read/written by the converters, and is stripped from the rendered
+# body. Marker present IFF the feature is on — absence means the default
+# (off), so marker-free documents stay byte-stable.
+_HYPHENATION_RE = re.compile(
+    r'\s*<div\s+class="hyphenation"([^>]*)>\s*</div>', re.I)
+_LINE_NUMBERS_RE = re.compile(
+    r'\s*<div\s+class="line-numbers"([^>]*)>\s*</div>', re.I)
+_WATERMARK_RE = re.compile(
+    r'\s*<div\s+class="watermark"([^>]*)>\s*</div>', re.I)
+_DIFFERENT_FIRST_RE = re.compile(
+    r'\s*<div\s+class="different-first"([^>]*)>\s*</div>', re.I)
+_ODD_EVEN_RE = re.compile(
+    r'\s*<div\s+class="odd-even"([^>]*)>\s*</div>', re.I)
+_HEADER_FROM_TOP_RE = re.compile(
+    r'\s*<div\s+class="header-from-top"([^>]*)>\s*</div>', re.I)
+_FOOTER_FROM_BOTTOM_RE = re.compile(
+    r'\s*<div\s+class="footer-from-bottom"([^>]*)>\s*</div>', re.I)
+
+
+def _section_flags_marker_from_docx(doc) -> str:
+    """hyphenation + line-numbers markers from settings.xml/sectPr. '' when
+    both features are off."""
+    out: list[str] = []
+    try:
+        settings_el = getattr(doc.settings, "element", None)
+        if settings_el is not None:
+            hy = settings_el.find(qn("w:autoHyphenation"))
+            if hy is not None:
+                val = (hy.get(qn("w:val")) or "").lower()
+                if val in ("", "1", "true", "on"):
+                    out.append('<div class="hyphenation" data-auto="1"></div>')
+    except Exception:
+        pass
+    try:
+        sectPr = doc.sections[0]._sectPr
+        if sectPr is not None:
+            ln = sectPr.find(qn("w:lnNumType"))
+            if ln is not None:
+                attrs = ""
+                restart = ln.get(qn("w:restart"))
+                dist = ln.get(qn("w:distance"))
+                if restart:
+                    attrs += f' data-restart="{escape(restart)}"'
+                if dist:
+                    attrs += f' data-distance="{escape(dist)}"'
+                out.append(f'<div class="line-numbers"{attrs}></div>')
+    except Exception:
+        pass
+    # Header/footer section markers (R5): different-first -> w:titlePg in
+    # sectPr, odd-even -> w:evenAndOddHeaders in settings.xml (like
+    # autoHyphenation), header-from-top / footer-from-bottom -> pgMar
+    # w:header / w:footer distances in twips. Emission order MUST match the
+    # strip order: hy, ln, df, oe, htf, ftb (watermark last) + editor.js
+    # SECTION_MARKER_ORDER. ODT models none of these (markers degrade
+    # there, like hyphenation / line numbers).
+    try:
+        sectPr = doc.sections[0]._sectPr
+        if sectPr is not None and sectPr.find(qn("w:titlePg")) is not None:
+            out.append('<div class="different-first"></div>')
+    except Exception:
+        pass
+    try:
+        settings_el = getattr(doc.settings, "element", None)
+        if settings_el is not None:
+            if settings_el.find(qn("w:evenAndOddHeaders")) is not None:
+                out.append('<div class="odd-even"></div>')
+    except Exception:
+        pass
+    try:
+        sectPr = doc.sections[0]._sectPr
+        if sectPr is not None:
+            pgMar = sectPr.find(qn("w:pgMar"))
+            if pgMar is not None:
+                # A materialized w:header of 720 == the OOXML default
+                # (0.5"), so it round-trips as the default, marker-free.
+                hv = pgMar.get(qn("w:header"))
+                if hv and int(hv) != 720:
+                    out.append(f'<div class="header-from-top" data-inches="{int(hv) / 1440:.3g}"></div>')
+                fv = pgMar.get(qn("w:footer"))
+                if fv and int(fv) != 720:
+                    out.append(f'<div class="footer-from-bottom" data-inches="{int(fv) / 1440:.3g}"></div>')
+    except Exception:
+        pass
+    return "".join(out)
+
+
+WM_CENTER_SZ = 64  # half-points; a watermark paragraph is >=32pt centered
+
+
+def _is_watermark_paragraph(p) -> bool:
+    """True when *p* looks like a watermark we wrote: single centered run,
+    bold, >=32pt, gray — the L1 signature (heuristic, documented)."""
+    try:
+        runs = p.findall(qn("w:r"))
+        if len(runs) != 1:
+            return False
+        rpr = runs[0].find(qn("w:rPr"))
+        sz = color = ""
+        bold = False
+        if rpr is not None:
+            s = rpr.find(qn("w:sz"))
+            sz = s.get(qn("w:val")) if s is not None else ""
+            c = rpr.find(qn("w:color"))
+            color = c.get(qn("w:val")) if c is not None else ""
+            b = rpr.find(qn("w:b"))
+            bold = b is not None and (b.get(qn("w:val")) or "1").lower() not in ("0", "false", "off")
+        ppr = p.find(qn("w:pPr"))
+        centered = False
+        if ppr is not None:
+            jc = ppr.find(qn("w:jc"))
+            centered = jc is not None and (jc.get(qn("w:val")) or "").lower() == "center"
+        try:
+            big = int(sz) >= WM_CENTER_SZ if sz else False
+        except ValueError:
+            big = False
+        gray = color == "" or int(color, 16) >> 16 == int(color, 16) & 255 == \
+            (int(color, 16) >> 8) & 255  # R == G == B
+        return bool(bold and big and centered and gray)
+    except Exception:
+        return False
+
+
+def _watermark_marker_from_docx(doc) -> str:
+    """Extract a watermark from the document header and strip it from the
+    header part (read path is allowed to mutate — the doc is from bytes)."""
+    try:
+        part = _find_header_part(doc)
+        if part is None:
+            return ""
+        hdr = part._element
+        for p in list(hdr.findall(qn("w:p"))):
+            if not _is_watermark_paragraph(p):
+                continue
+            txt = "".join(
+                (r.find(qn("w:t")).text or "")
+                for r in p.findall(qn("w:r"))
+                if r.find(qn("w:t")) is not None)
+            rpr = p.findall(qn("w:r"))[0].find(qn("w:rPr"))
+            color = ""
+            if rpr is not None:
+                c = rpr.find(qn("w:color"))
+                color = c.get(qn("w:val")) if c is not None else ""
+            marker = f'<div class="watermark" data-text="{escape(txt.strip())}"'
+            if color:
+                marker += f' data-color="#{color.lower()}"'
+            marker += "></div>"
+            hdr.remove(p)
+            return marker
+    except Exception:
+        pass
+    return ""
+
+
+def _watermark_paragraph_html(attrs: str) -> str:
+    """The header-paragraph HTML a watermark marker maps to (and back)."""
+    text = re.search(r'data-text="([^"]*)"', attrs)
+    color = re.search(r'data-color="([^"]*)"', attrs)
+    t = text.group(1) if text else "DRAFT"
+    c = color.group(1) if color else "#C0C0C0"
+    # Align on the <p>, the run styles on an inner <span> (the header run
+    # filler maps those onto the w:rPr — the watermark signature).
+    return (f'<p style="text-align:center"><span style="font-size:32pt;'
+            f'color:{c};font-weight:bold">{escape(t)}</span></p>')
+
+
+def _apply_section_flags(hy_attrs: str | None, ln_attrs: str | None,
+                          hf_attrs: dict[str, str | None], doc) -> None:
+    """Apply hyphenation (settings.xml) + line numbers (sectPr) markers plus
+    the R5 header/footer markers: different-first -> w:titlePg (sectPr),
+    odd-even -> w:evenAndOddHeaders (settings.xml), header-from-top /
+    footer-from-bottom -> pgMar w:header / w:footer distances (twips)."""
+    if hy_attrs is not None:
+        try:
+            settings_el = getattr(doc.settings, "element", None)
+            if settings_el is not None and settings_el.find(qn("w:autoHyphenation")) is None:
+                el = OxmlElement("w:autoHyphenation")
+                el.set(qn("w:val"), "true")
+                settings_el.append(el)
+        except Exception:
+            pass
+    if ln_attrs is not None:
+        try:
+            sectPr = doc.sections[0]._sectPr
+            if sectPr is not None:
+                el = sectPr.find(qn("w:lnNumType"))
+                if el is None:
+                    el = OxmlElement("w:lnNumType")
+                    anchor = sectPr.find(qn("w:docGrid"))
+                    if anchor is None:
+                        anchor = sectPr.find(qn("w:cols"))
+                    if anchor is None:
+                        anchor = sectPr.find(qn("w:pgNumType"))
+                    if anchor is not None:
+                        anchor.addprevious(el)
+                    else:
+                        sectPr.append(el)
+                restart = re.search(r'data-restart="([^"]*)"', ln_attrs)
+                if restart:
+                    el.set(qn("w:restart"), restart.group(1))
+                dist = re.search(r'data-distance="([^"]*)"', ln_attrs)
+                if dist:
+                    el.set(qn("w:distance"), dist.group(1))
+        except Exception:
+            pass
+    if "df" in hf_attrs:
+        try:
+            sectPr = doc.sections[0]._sectPr
+            if sectPr is not None and sectPr.find(qn("w:titlePg")) is None:
+                el = OxmlElement("w:titlePg")
+                anchor = sectPr.find(qn("w:docGrid"))
+                if anchor is not None:
+                    anchor.addprevious(el)
+                else:
+                    sectPr.append(el)
+        except Exception:
+            pass
+    if "htf" in hf_attrs or "ftb" in hf_attrs:
+        try:
+            sectPr = doc.sections[0]._sectPr
+            if sectPr is not None:
+                pgMar = sectPr.find(qn("w:pgMar"))
+                if pgMar is None:
+                    pgMar = OxmlElement("w:pgMar")
+                    anchor = sectPr.find(qn("w:pgSz"))
+                    if anchor is not None:
+                        anchor.addnext(pgMar)
+                    else:
+                        sectPr.append(pgMar)
+                if "htf" in hf_attrs:
+                    m = re.search(r'data-inches="([^"]*)"', hf_attrs["htf"])
+                    if m:
+                        pgMar.set(qn("w:header"), str(int(round(float(m.group(1)) * 1440))))
+                if "ftb" in hf_attrs:
+                    m = re.search(r'data-inches="([^"]*)"', hf_attrs["ftb"])
+                    if m:
+                        pgMar.set(qn("w:footer"), str(int(round(float(m.group(1)) * 1440))))
+        except Exception:
+            pass
+    if "oe" in hf_attrs:
+        try:
+            settings_el = getattr(doc.settings, "element", None)
+            if settings_el is not None and settings_el.find(qn("w:evenAndOddHeaders")) is None:
+                el = OxmlElement("w:evenAndOddHeaders")
+                settings_el.append(el)
+        except Exception:
+            pass
+
+
+_DROP_CAP_RE = re.compile(r'^<span class="dropcap">([^<]*)</span>', re.I)
+
+
 def html_to_docx(html_fragment: str) -> bytes:
     """Convert an HTML fragment into DOCX bytes."""
     # A <section data-columns> wrapper carries section-column layout
@@ -2192,12 +3399,48 @@ def html_to_docx(html_fragment: str) -> bytes:
         if gm:
             section_gap = int(gm.group(1))
         html_fragment = sec_m.group(2)
+    # The page-setup marker (document page geometry, F-090/F-091/F-092)
+    # rides at body start; apply it to the section properties and strip it
+    # from the body so it never becomes a paragraph.
+    ps_m = _PAGE_SETUP_RE.match(html_fragment)
+    ps_attrs = ps_m.group(1) if ps_m else None
+    if ps_m:
+        html_fragment = html_fragment[ps_m.end():]
+    # Section flag markers (hyphenation / line numbers / watermark /
+    # header-footer) ride at body start in the same fixed order the reader
+    # emits them (hy, ln, df, oe, htf, ftb, wm).
+    hy_attrs = ln_attrs = wm_attrs = None
+    hf_attrs: dict[str, str | None] = {}
+    for marker, holder in ((_HYPHENATION_RE, "hy"),
+                           (_LINE_NUMBERS_RE, "ln"),
+                           (_DIFFERENT_FIRST_RE, "df"),
+                           (_ODD_EVEN_RE, "oe"),
+                           (_HEADER_FROM_TOP_RE, "htf"),
+                           (_FOOTER_FROM_BOTTOM_RE, "ftb"),
+                           (_WATERMARK_RE, "wm")):
+        m = marker.match(html_fragment)
+        if not m:
+            continue
+        if holder == "hy":
+            hy_attrs = m.group(1)
+        elif holder == "ln":
+            ln_attrs = m.group(1)
+        elif holder == "wm":
+            wm_attrs = m.group(1)
+        else:
+            hf_attrs[holder] = m.group(1)
+        html_fragment = html_fragment[m.end():]
     # Split tables out; python-docx tables and paragraphs share the body
     # but order interleaving is complex — append tables at the end.
     tables_html = _TAG_TABLE.findall(html_fragment)
     body = _TAG_TABLE.sub("", html_fragment)
 
     doc = Document()
+    if ps_attrs:
+        try:
+            _apply_page_setup_marker(ps_attrs, doc.sections[0])
+        except Exception:
+            pass  # a malformed marker degrades to document defaults
     if section_cols and section_cols > 1:
         sectPr = doc.sections[0]._sectPr
         if sectPr is None:
@@ -2212,6 +3455,31 @@ def html_to_docx(html_fragment: str) -> bytes:
             cols_el.set(qn("w:space"), str(int(section_gap * 15)))
         else:
             cols_el.attrib.pop(qn("w:space"), None)
+
+    # Apply the section flag markers (hyphenation in settings.xml / line
+    # numbers in sectPr / header-footer in titlePg, settings.xml and pgMar;
+    # page geometry was applied above).
+    if hy_attrs is not None or ln_attrs is not None or hf_attrs:
+        try:
+            _apply_section_flags(hy_attrs, ln_attrs, hf_attrs, doc)
+        except Exception:
+            pass  # a malformed marker degrades to the defaults
+    # The watermark marker rides the document header: fold its paragraph
+    # into the header content (creating a header if none was supplied).
+    # The color is validated so hostile data can't smuggle raw CSS through.
+    if wm_attrs is not None and re.search(r'data-color="#[0-9a-fA-F]{6}"', wm_attrs):
+        try:
+            wm_par = _watermark_paragraph_html(wm_attrs)
+        except Exception:
+            wm_par = None
+        if wm_par:
+            hdr_has = re.search(r'<header([^>]*)>(.*?)</header>', body, re.S | re.I)
+            if hdr_has:
+                body = (body[:hdr_has.start()]
+                        + f'<header{hdr_has.group(1)}>{wm_par}{hdr_has.group(2)}</header>'
+                        + body[hdr_has.end():])
+            else:
+                body = f'<header>{wm_par}</header>' + body
 
     # Extract header and footer if present
     header_content = None
@@ -2273,13 +3541,13 @@ def html_to_docx(html_fragment: str) -> bytes:
             # it to a left-indented paragraph (the HTML contract for indent).
             p = doc.add_paragraph("")
             _apply_para_props(p, {"margin-left": 24.0})
-            _add_styled_runs(p, op[2])
+            _add_styled_runs(p, _strip_dropcap(p, op[2]))
             continue
         if kind == "h":
             props = _parse_para_props(op[2])
             p = doc.add_heading("", level=op[1])
             _apply_para_props(p, props)
-            _add_styled_runs(p, op[3])
+            _add_styled_runs(p, _strip_dropcap(p, op[3]))
             continue
         # paragraph
         props = _parse_para_props(op[1])
@@ -2289,7 +3557,7 @@ def html_to_docx(html_fragment: str) -> bytes:
             p.alignment = WD_ALIGN_PARAGRAPH.CENTER
         elif props.get("text-align") == "right":
             p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
-        _add_styled_runs(p, op[2])
+        _add_styled_runs(p, _strip_dropcap(p, op[2]))
 
     # Tag-less input (e.g. raw text typed into an empty contenteditable):
     # keep it as a single paragraph instead of dropping it silently.
@@ -2355,8 +3623,13 @@ class _InlineRunBuilder(HTMLParser):
         self._note = None       # pending footnote/endnote (see _start_note)
         self._comment = None    # pending comment span (see handle_starttag)
         self._bookmark = None   # pending bookmark span (see handle_starttag)
+        self._field = None      # pending field span (class="field" data-field=X)
+        self._cc = None         # pending content-control span (class="content-control")
         self._track = None      # pending track-change (see handle_starttag)
+        self._citation = None   # pending ref-citation (see _start_citation)
+        self._index_entry = None  # pending ref-index entry (see _start_index)
         self._buf: list[str] = []
+        self._float = None      # pending floated image (class obj-*)
 
     def _start_note(self, attrs) -> bool:
         """True when the attrs mark a footnote/endnote citation <sup>. Starts a
@@ -2394,6 +3667,62 @@ class _InlineRunBuilder(HTMLParser):
                 "vert": "sup",
             })
 
+    def _start_citation(self, attrs) -> bool:
+        """True when attrs mark a ref-citation <sup>. Starts a pending citation
+        marker token."""
+        cls = set((dict(attrs).get("class") or "").split())
+        if "ref-citation" not in cls:
+            return False
+        self._citation = {
+            "key": dict(attrs).get("data-key", ""),
+            "text": "",
+            "token_pos": len(self.tokens),
+        }
+        return True
+
+    def _start_index(self, attrs) -> bool:
+        """True when attrs mark a ref-index <span>. Starts a pending index
+        entry marker token."""
+        cls = set((dict(attrs).get("class") or "").split())
+        if "ref-index" not in cls:
+            return False
+        self._index_entry = {
+            "entry": dict(attrs).get("data-entry", ""),
+            "html": [],
+            "text": "",  # Also store plain text for ODT compatibility
+            "depth": 0,
+            "token_pos": len(self.tokens),
+        }
+        return True
+
+    def _orphan_citation(self) -> None:
+        """Emit a pending ref-citation that had no body as a plain sup."""
+        if self._citation is None:
+            return
+        pos = self._citation["token_pos"]
+        text = self._citation["text"]
+        self._citation = None
+        if text:
+            self.tokens.insert(pos, {
+                "type": "text",
+                "text": text,
+                "vert": "sup",
+            })
+
+    def _orphan_index(self) -> None:
+        """Emit a pending ref-index entry as plain text."""
+        if self._index_entry is None:
+            return
+        pos = self._index_entry["token_pos"]
+        html = "".join(self._index_entry["html"])
+        text = self._index_entry["text"]
+        self._index_entry = None
+        if html or text:
+            self.tokens.insert(pos, {
+                "type": "text",
+                "text": text or _inline_to_text(html),
+            })
+
     def handle_starttag(self, tag: str, attrs) -> None:
         if self._track is not None:
             # collect the track-change element's inner markup
@@ -2423,6 +3752,18 @@ class _InlineRunBuilder(HTMLParser):
                 self._comment["depth"] += 1
             self._comment["html"].append(self.get_starttag_text())
             return
+        if self._field is not None:
+            # collect the field display span's inner markup
+            if tag not in _VOID_TAGS:
+                self._field["depth"] += 1
+            self._field["html"].append(self.get_starttag_text())
+            return
+        if self._cc is not None:
+            # collect the content-control span's inner markup
+            if tag not in _VOID_TAGS:
+                self._cc["depth"] += 1
+            self._cc["html"].append(self.get_starttag_text())
+            return
         if tag == "span" and "comment" in (dict(attrs).get("class") or "").split():
             # <span class="comment" data-author=.. data-comment=..>TEXT</span>
             self._flush()
@@ -2450,6 +3791,41 @@ class _InlineRunBuilder(HTMLParser):
                 "depth": 1,
             }
             return
+        if tag == "span" and "field" in (dict(attrs).get("class") or "").split():
+            # <span class="field" data-field="DATE">display</span>
+            self._flush()
+            a = dict(attrs)
+            kind = (a.get("data-field") or "").strip().upper()
+            if kind in _FIELD_INSTRS:
+                self._field = {"instr": kind, "html": [], "depth": 1}
+            return
+        if tag == "span" and "content-control" in (dict(attrs).get("class") or "").split():
+            # <span class="content-control" data-cc="plain">TEXT</span>
+            self._flush()
+            a = dict(attrs)
+            self._cc = {
+                "kind": (a.get("data-cc") or "plain").strip(),
+                "title": (a.get("title") or "").strip(),
+                "html": [],
+                "depth": 1,
+            }
+            return
+        if tag == "sup" and self._start_citation(attrs):
+            # ref-citation: flush any pending text, then start collecting
+            self._flush()
+            return
+        if self._citation is not None:
+            # Already collecting citation text; don't start another marker
+            return
+        if tag == "span" and self._start_index(attrs):
+            # ref-index: flush any pending text, then start collecting
+            self._flush()
+            self._index_entry["depth"] = 1
+            return
+        if self._index_entry is not None:
+            if tag not in _VOID_TAGS:
+                self._index_entry["depth"] += 1
+            return
         if self._note is not None and not self._note["in_body"]:
             # An open citation <sup>: the confirming <span class=...> directly
             # adjacent starts the body; anything else orphans the citation
@@ -2471,13 +3847,39 @@ class _InlineRunBuilder(HTMLParser):
         if tag == "img":
             self._flush()
             a = dict(attrs)
-            self.tokens.append({
+            cls = set((a.get("class") or "").split())
+            token = {
                 "type": "image",
                 "src": a.get("src", ""),
                 "alt": a.get("alt", ""),
                 "width": _parse_px(a.get("width")),
                 "height": _parse_px(a.get("height")),
-            })
+            }
+            # Chart/equation imgs: kind + JSON spec drive the real OOXML
+            # engines on save (chart part / OMML) instead of the bitmap.
+            dk = a.get("data-kind")
+            ds = a.get("data-spec")
+            if dk:
+                token["kind"] = dk
+            if ds:
+                token["spec"] = ds
+            # Floating pictures (object-layout popup): carried on the token so
+            # the writer emits an anchored w:drawing instead of an inline one.
+            if "obj-behind" in cls:
+                token["float"] = "behind"
+            elif "obj-square" in cls or "obj-right" in cls:
+                token["float"] = "square"
+            if "obj-right" in cls:
+                token["float_side"] = "right"
+            # object-layout popup also drives floats via inline style
+            style = a.get("style") or ""
+            fm = re.search(r"float\s*:\s*(left|right)", style)
+            if "float" not in token and fm:
+                token["float"] = "square"
+                if fm.group(1) == "right":
+                    token["float_side"] = "right"
+            self.tokens.append(token)
+            return
         elif tag in ("b", "strong"):
             self._flush()
             self._bold += 1
@@ -2596,6 +3998,56 @@ class _InlineRunBuilder(HTMLParser):
                     "html": "".join(bm["html"]),
                 })
             return
+        if self._field is not None:
+            if tag not in _VOID_TAGS:
+                self._field["depth"] = max(0, self._field["depth"] - 1)
+            self._field["html"].append(f"</{tag}>")
+            if self._field["depth"] == 0:
+                f = self._field
+                self._field = None
+                self.tokens.append({
+                    "type": "field",
+                    "instr": f["instr"],
+                    "html": "".join(f["html"]),
+                })
+            return
+        if self._cc is not None:
+            if tag not in _VOID_TAGS:
+                self._cc["depth"] = max(0, self._cc["depth"] - 1)
+            self._cc["html"].append(f"</{tag}>")
+            if self._cc["depth"] == 0:
+                cc = self._cc
+                self._cc = None
+                self.tokens.append({
+                    "type": "cc",
+                    "kind": cc["kind"],
+                    "title": cc["title"],
+                    "html": "".join(cc["html"]),
+                })
+            return
+        if self._citation is not None:
+            if tag == "sup":
+                citation = self._citation
+                self._citation = None
+                self.tokens.append({
+                    "type": "ref-citation",
+                    "key": citation["key"],
+                    "text": citation["text"],
+                })
+            return
+        if self._index_entry is not None:
+            if tag == "span":
+                self._index_entry["depth"] = max(0, self._index_entry["depth"] - 1)
+                if self._index_entry["depth"] == 0:
+                    index = self._index_entry
+                    self._index_entry = None
+                    self.tokens.append({
+                        "type": "ref-index",
+                        "entry": index["entry"],
+                        "html": "".join(index["html"]),
+                        "text": index["text"],
+                    })
+            return
         if self._note is not None and self._note["in_body"]:
             if tag not in _VOID_TAGS:
                 self._note["depth"] = max(0, self._note["depth"] - 1)
@@ -2658,6 +4110,19 @@ class _InlineRunBuilder(HTMLParser):
         if self._bookmark is not None:
             self._bookmark["html"].append(escape(data))
             return
+        if self._field is not None:
+            self._field["html"].append(escape(data))
+            return
+        if self._cc is not None:
+            self._cc["html"].append(escape(data))
+            return
+        if self._citation is not None:
+            self._citation["text"] += data
+            return
+        if self._index_entry is not None:
+            self._index_entry["html"].append(escape(data))
+            self._index_entry["text"] += data
+            return
         if (
             self._note is not None
             and not self._note["in_body"]
@@ -2688,6 +4153,10 @@ class _InlineRunBuilder(HTMLParser):
                 "name": bm["name"],
                 "html": "".join(bm["html"]),
             })
+        if self._citation is not None:
+            self._orphan_citation()
+        if self._index_entry is not None:
+            self._orphan_index()
         if self._note is not None:
             if not self._note["in_body"]:
                 self._orphan_note()
@@ -2784,6 +4253,18 @@ def _add_styled_runs(paragraph, html: str) -> None:
         if token["type"] == "bookmark":
             _add_bookmark(paragraph, token)
             continue
+        if token["type"] == "ref-citation":
+            _add_ref_citation(paragraph, token)
+            continue
+        if token["type"] == "ref-index":
+            _add_ref_index(paragraph, token)
+            continue
+        if token["type"] == "field":
+            _add_field(paragraph, token)
+            continue
+        if token["type"] == "cc":
+            _add_content_control(paragraph, token)
+            continue
         run = paragraph.add_run(token["text"])
         if token["bold"]:
             run.bold = True
@@ -2792,6 +4273,79 @@ def _add_styled_runs(paragraph, html: str) -> None:
         if token["underline"]:
             run.underline = True
         _apply_run_style(run, token)
+
+
+def _add_field(paragraph, token: dict) -> None:
+    """Emit a live Word field (``w:fldSimple``) with its display runs inside.
+
+    The cached value renders immediately; Word re-computes the field on
+    open/refresh. Only the safe instr set is accepted — anything else is
+    dropped (never smuggles a raw instr string into a document).
+    """
+    instr = (token.get("instr") or "").strip().upper()
+    if instr not in _FIELD_INSTRS:
+        return
+    fld = OxmlElement("w:fldSimple")
+    fld.set(qn("w:instr"), f" {instr} ")
+    for inner in _inline_tokens(token.get("html") or ""):
+        if inner["type"] != "text":
+            continue
+        r = OxmlElement("w:r")
+        if inner.get("bold") or inner.get("italic"):
+            rPr = OxmlElement("w:rPr")
+            if inner.get("bold"):
+                rPr.append(OxmlElement("w:b"))
+            if inner.get("italic"):
+                rPr.append(OxmlElement("w:i"))
+            r.append(rPr)
+        t = OxmlElement("w:t")
+        t.text = inner.get("text", "")
+        t.set(qn("xml:space"), "preserve")
+        r.append(t)
+        fld.append(r)
+    paragraph._p.append(fld)
+
+
+def _add_content_control(paragraph, token: dict) -> None:
+    """Emit a Word structured document tag (``w:sdt``) around runs.
+
+    The HTML contract (``<span class="content-control" data-cc=..>``)
+    round-trips: plain/rich get no dropdown items, ``dropdown`` gets an
+    empty list placeholder (the running selection is the cached value).
+    """
+    kind = (token.get("kind") or "plain").strip()
+    if kind not in {"plain", "rich", "dropdown"}:
+        kind = "plain"
+    sdt = OxmlElement("w:sdt")
+    pr = OxmlElement("w:sdtPr")
+    alias = OxmlElement("w:alias")
+    alias.set(qn("w:val"), token.get("title") or kind.title())
+    pr.append(alias)
+    tag = OxmlElement("w:tag")
+    tag.set(qn("w:val"), kind)
+    pr.append(tag)
+    if kind == "dropdown":
+        pr.append(OxmlElement("w:listItems"))  # placeholder; values stay in the doc
+    sdt.append(pr)
+    content = OxmlElement("w:sdtContent")
+    for inner in _inline_tokens(token.get("html") or ""):
+        if inner["type"] != "text":
+            continue
+        r = OxmlElement("w:r")
+        if inner.get("bold") or inner.get("italic"):
+            rPr = OxmlElement("w:rPr")
+            if inner.get("bold"):
+                rPr.append(OxmlElement("w:b"))
+            if inner.get("italic"):
+                rPr.append(OxmlElement("w:i"))
+            r.append(rPr)
+        t = OxmlElement("w:t")
+        t.text = inner.get("text", "")
+        t.set(qn("xml:space"), "preserve")
+        r.append(t)
+        content.append(r)
+    sdt.append(content)
+    paragraph._p.append(sdt)
 
 
 def _next_bookmark_id(part) -> int:
@@ -2824,6 +4378,10 @@ def _add_bookmark(paragraph, token: dict) -> None:
             _add_track_change(paragraph, inner)
         elif inner["type"] == "link":
             _add_hyperlink(paragraph, inner)
+        elif inner["type"] == "field":
+            _add_field(paragraph, inner)
+        elif inner["type"] == "cc":
+            _add_content_control(paragraph, inner)
         else:
             run = paragraph.add_run(inner.get("text", ""))
             if inner.get("bold"):
@@ -2836,6 +4394,46 @@ def _add_bookmark(paragraph, token: dict) -> None:
     end = OxmlElement("w:bookmarkEnd")
     end.set(qn("w:id"), str(bid))
     paragraph._p.append(end)
+
+
+def _add_ref_citation(paragraph, token: dict) -> None:
+    """Insert a reference citation as a CITATION field.
+
+    L1 implementation: emits a w:fldSimple with w:instr="CITATION ..."
+    inside a run to survive round-trip. The display text is stored as 
+    the citation text.
+    """
+    text = token.get("text") or "[1]"
+    # Create a run with the field inside
+    run = paragraph.add_run()
+    fld = OxmlElement("w:fldSimple")
+    fld.set(qn("w:instr"), f"CITATION {token.get('key', '')}")
+    r = OxmlElement("w:r")
+    t = OxmlElement("w:t")
+    t.text = text
+    r.append(t)
+    fld.append(r)
+    run._r.append(fld)
+
+
+def _add_ref_index(paragraph, token: dict) -> None:
+    """Insert an index entry as an XE field.
+
+    L1 implementation: emits a w:fldSimple with w:instr="XE ..." to survive
+    round-trip. The entry text is the content.
+    """
+    html = token.get("html") or ""
+    text = _inline_to_text(html) or token.get("entry") or "Index Entry"
+    # Create a run with the field inside
+    run = paragraph.add_run()
+    fld = OxmlElement("w:fldSimple")
+    fld.set(qn("w:instr"), f"XE \"{text}\"")
+    r = OxmlElement("w:r")
+    t = OxmlElement("w:t")
+    t.text = text
+    r.append(t)
+    fld.append(r)
+    run._r.append(fld)
 
 
 def _add_hyperlink(paragraph, token: dict) -> None:
@@ -2914,6 +4512,19 @@ def _add_image_run(paragraph, token: dict) -> None:
     round-trips back out.
     """
     mime, content = _decode_data_uri(token.get("src") or "")
+    # Hand-rolled object engines: chart/equation imgs carry a data-spec and
+    # are stored as real DrawingML chart parts / OMML instead of bitmaps.
+    try:
+        if token.get("kind") == "chart" and token.get("spec"):
+            spec = json.loads(token["spec"])
+            _add_chart_drawing(paragraph, spec)
+            return
+        if token.get("kind") == "equation" and token.get("spec"):
+            d = json.loads(token["spec"]) or {}
+            _add_omml_equation(paragraph, d.get("text") or "", d.get("label") or "")
+            return
+    except Exception as exc:  # malformed spec must degrade to the PNG
+        logging.getLogger(__name__).warning("object engine fell back to PNG: %s", exc)
     if content is None:
         return
     width = token.get("width")
@@ -2936,6 +4547,11 @@ def _add_image_run(paragraph, token: dict) -> None:
     alt = (token.get("alt") or "").strip()
     if alt:
         _set_drawing_alt(run._r, alt)
+    # A floated picture becomes an ANCHORED drawing (wp:anchor + wrap), so
+    # text actually flows around it and Word keeps the float on round-trip.
+    wrap = token.get("float")
+    if wrap in ("square", "behind"):
+        _convert_inline_to_anchor(run._r, wrap, token.get("float_side"))
 
 
 def _set_drawing_alt(r, alt: str) -> None:
@@ -2946,6 +4562,64 @@ def _set_drawing_alt(r, alt: str) -> None:
     for docPr in drawing.iter(qn("wp:docPr")):
         docPr.set("descr", alt)
         break
+
+
+def _convert_inline_to_anchor(r, wrap: str, side: str | None) -> None:
+    """Turn a run's inline picture drawing into an anchored (floating) one.
+
+    ``wp:inline`` becomes ``wp:anchor`` carrying the wrap element and an
+    alignment-hint position, so text wraps around the picture and the float
+    survives DOCX -> HTML -> DOCX. ``wrap`` is ``square`` (wrapSquare) or
+    ``behind`` (wrapBehind, behindDoc=1); ``side`` left/right/None seeds the
+    horizontal anchor.
+    """
+    drawing = r.find(qn("w:drawing"))
+    if drawing is None:
+        return
+    inline = drawing.find(qn("wp:inline"))
+    if inline is None:
+        return
+    anchor = OxmlElement("wp:anchor")
+    behind = wrap == "behind"
+    for attr, val in (
+        ("distT", "0"), ("distB", "0"), ("distL", "0"), ("distR", "0"),
+        ("simplePos", "0"), ("relativeHeight", "251658240"),
+        ("behindDoc", "1" if behind else "0"), ("locked", "0"),
+        ("layoutInCell", "1"), ("allowOverlap", "1"),
+    ):
+        anchor.set(attr, val)
+    simple_pos = OxmlElement("wp:simplePos")
+    simple_pos.set(qn("wp:x"), "0")
+    simple_pos.set(qn("wp:y"), "0")
+    anchor.append(simple_pos)
+    pos_h = OxmlElement("wp:positionH")
+    pos_h.set("relativeFrom", "column")
+    h_align = OxmlElement("wp:align")
+    h_align.text = "right" if side == "right" else "left"
+    pos_h.append(h_align)
+    anchor.append(pos_h)
+    pos_v = OxmlElement("wp:positionV")
+    pos_v.set("relativeFrom", "paragraph")
+    v_offset = OxmlElement("wp:posOffset")
+    v_offset.text = "0"
+    pos_v.append(v_offset)
+    anchor.append(pos_v)
+    for tag in (
+        "wp:extent", "wp:effectExtent", "wp:docPr",
+        "wp:cNvGraphicFramePr", "a:graphic",
+    ):
+        el = inline.find(qn(tag))
+        if el is not None:
+            inline.remove(el)
+            anchor.append(el)
+    wrap_el = OxmlElement("wp:wrapSquare" if wrap == "square" else "wp:wrapBehind")
+    if wrap == "square":
+        wrap_el.set("wrapText", "bothSides")
+    # insert wrap element after extent/effectExtent, before docPr
+    docPr = anchor.find(qn("wp:docPr"))
+    anchor.insert(list(anchor).index(docPr), wrap_el)
+    drawing.remove(inline)
+    drawing.append(anchor)
 
 
 def _parse_border(style: str) -> str | None:

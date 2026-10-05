@@ -27,7 +27,9 @@ from conftest import (
     dav_mkcol,
     dav_propfind,
     dav_put,
+    ensure_user,
     goto,
+    _mount_retries,
     ocs_create_share,
     ocs_delete_share,
     ocs_shares,
@@ -46,6 +48,7 @@ def bob_session() -> requests.Session:
     s = requests.Session()
     s.auth = (BOB, BOB_PASS)
     s.verify = False
+    _mount_retries(s)
     return s
 
 
@@ -72,6 +75,7 @@ def _poll(fn, want, timeout_s: float = 30.0, interval: float = 2.0):
 @pytest.fixture(scope="module")
 def project(session_ctx):
     """A project folder shared with bob (editor rights)."""
+    ensure_user(BOB, BOB_PASS, "Bob Tester")  # bob must exist + know his password
     folder = f"Shared-Project-{random.randint(1000, 9999)}"
     assert dav_mkcol(folder).status_code == 201
     assert dav_put(f"{folder}/notes.docx", docx_bytes()).status_code == 201
@@ -305,7 +309,7 @@ def test_07_share_panel_lists_bob(session_ctx, project):
         listed = False
         while time.time() < deadline and not listed:
             txt = panel.inner_text()
-            listed = BOB in txt or "WO Test Bob" in txt
+            listed = BOB in txt or "Bob Tester" in txt
             if not listed:
                 page.wait_for_timeout(1500)
         assert listed, f"share panel does not list bob (panel: {panel.inner_text()[:300]!r})"

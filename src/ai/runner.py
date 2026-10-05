@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
+import json
 from typing import Any
 
 from .tools import ToolContext, call_tool
@@ -79,6 +80,7 @@ class AgentRunner:
         doc_id: str,
         client_id: str,
         task: str,
+        audit: Any = None,
     ) -> AgentReport:
         """Run the loop: read -> (model decides) -> tool calls -> repeat.
 
@@ -88,15 +90,20 @@ class AgentRunner:
         used, or when ``max_ops`` edits have been applied — whichever comes
         first. Budgets are the runaway-loop protection: an agent can never
         spin forever or flood the hub.
+
+        With ``audit`` (a ``DocumentStore``), the finished run leaves an
+        audit row (E20) — who ran, when, with what budget and outcome.
         """
         report = AgentReport(doc_id=doc_id, client_id=client_id, task=task)
         messages: list[dict[str, Any]] = [{"role": "task", "content": task}]
+        reason_set = False
 
         while report.steps < self.max_steps and report.ops_applied < self.max_ops:
             calls = self._safe_model(messages, report)
             report.steps += 1
             if not calls:
                 report.stopped_reason = STOP_DONE
+                reason_set = True
                 break
             for call in calls:
                 if not isinstance(call, dict):
@@ -111,17 +118,41 @@ class AgentRunner:
                 report.transcript.append({"call": call, "result": result})
             if report.ops_applied >= self.max_ops:
                 report.stopped_reason = STOP_MAX_OPS
+                reason_set = True
         else:
-            if report.ops_applied >= self.max_ops:
-                report.stopped_reason = STOP_MAX_OPS
-            elif report.steps >= self.max_steps:
-                report.stopped_reason = STOP_MAX_STEPS
+            # both budgets exhausted at once: ops is the more informative
+            # reason — a reason set inside the loop body wins
+            if not reason_set:
+                if report.ops_applied >= self.max_ops:
+                    report.stopped_reason = STOP_MAX_OPS
+                elif report.steps >= self.max_steps:
+                    report.stopped_reason = STOP_MAX_STEPS
 
         if not report.text:
             from .tools import tool_read_doc
 
             state = tool_read_doc(ctx, doc_id)
             report.text = state.get("text", "") if state.get("ok") else ""
+        if audit is not None:
+            try:
+                from .audit import redact_transcript
+
+                run_id = audit.record_agent_run(
+                    doc_id=doc_id,
+                    client_id=client_id,
+                    task=task,
+                    steps=report.steps,
+                    ops=report.ops_applied,
+                    rev=report.rev,
+                    stopped_reason=report.stopped_reason,
+                )
+                # E20S1: redacted transcript, retention-bounded by the store.
+                audit.record_agent_trace(
+                    run_id,
+                    json.dumps(redact_transcript(report.transcript), ensure_ascii=False),
+                )
+            except Exception:  # noqa: BLE001 — auditing must never break a run
+                pass
         return report
 
     def _safe_model(self, messages: list[dict[str, Any]], report: AgentReport) -> list:

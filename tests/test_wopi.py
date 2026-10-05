@@ -10,6 +10,7 @@ from html.parser import HTMLParser
 import pytest
 from docx import Document
 from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 from odf.opendocument import load
 
@@ -22,11 +23,11 @@ from src.lib.store import DocumentStore, wipe_db, wipe_dir
 from src.wopi.router import router as wopi_router
 
 
-def _make_app(tmp_path) -> tuple[FastAPI, DocumentStore]:
+def _make_app(tmp_path, cfg=None) -> tuple[FastAPI, DocumentStore]:
     db = str(tmp_path / "t.db")
     content = str(tmp_path / "content")
     store = DocumentStore(db, content)
-    cfg = Config(database=db, content_dir=content, jwt_secret="test-secret")
+    cfg = cfg or Config(database=db, content_dir=content, jwt_secret="test-secret")
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -36,6 +37,12 @@ def _make_app(tmp_path) -> tuple[FastAPI, DocumentStore]:
         yield
 
     app = FastAPI(lifespan=lifespan)
+    from src.wopi.protocol import WopiError
+
+    @app.exception_handler(WopiError)
+    async def wopi_error_handler(request, exc):
+        return JSONResponse(status_code=exc.status, content={"error": exc.message})
+
     app.include_router(wopi_router)
     app.include_router(editor_router)
     return app, store
@@ -1783,3 +1790,73 @@ def test_sanitize_nests_stray_list_into_preceding_li():
     norm = out.replace("\n", "")
     assert ("<ul><li>first item<ul><li>second item</li></ul></li></ul>"
             in norm), norm
+
+
+# ----------------------------------------------------------------------
+# require_wopi_auth gate (WOPI 1.0 token validation for host routes)
+# ----------------------------------------------------------------------
+
+def test_wopi_auth_gate_denies_anonymous_when_enforced(tmp_path):
+    """With require_wopi_auth on, /wopi/* without a token -> 401."""
+    app, _ = _make_app(tmp_path, cfg=Config(
+        database=str(tmp_path / "t.db"),
+        content_dir=str(tmp_path / "content"),
+        jwt_secret="test-secret",
+        require_wopi_auth=True,
+    ))
+    with TestClient(app) as c:
+        store = app.state.store
+        store.init("docA", "a.docx")
+        store.put_content("docA", _docx_bytes())
+        res = c.get("/wopi/files/docA")
+        assert res.status_code == 401
+        assert res.json()["error"] == "Missing access_token"
+        res2 = c.get("/wopi/files/docA/contents")
+        assert res2.status_code == 401
+
+
+def test_wopi_auth_gate_accepts_valid_token(tmp_path):
+    """A valid signed token passes the gate and reaches the handler."""
+    from src.lib.crypto import encode_token
+
+    app, _ = _make_app(tmp_path, cfg=Config(
+        database=str(tmp_path / "t.db"),
+        content_dir=str(tmp_path / "content"),
+        jwt_secret="test-secret",
+        require_wopi_auth=True,
+    ))
+    token = encode_token("test-secret", {"fileid": "docA"})
+    with TestClient(app) as c:
+        store = app.state.store
+        store.init("docA", "a.docx")
+        store.put_content("docA", _docx_bytes())
+        res = c.get("/wopi/files/docA", params={"access_token": token})
+        assert res.status_code == 200
+        assert res.json()["BaseFileName"] == "a.docx"
+
+
+def test_wopi_auth_gate_rejects_bad_token(tmp_path):
+    """A token signed with the wrong secret is refused."""
+    from src.lib.crypto import encode_token
+
+    app, _ = _make_app(tmp_path, cfg=Config(
+        database=str(tmp_path / "t.db"),
+        content_dir=str(tmp_path / "content"),
+        jwt_secret="test-secret",
+        require_wopi_auth=True,
+    ))
+    token = encode_token("wrong-secret", {"fileid": "docA"})
+    with TestClient(app) as c:
+        store = app.state.store
+        store.init("docA", "a.docx")
+        store.put_content("docA", _docx_bytes())
+        res = c.get("/wopi/files/docA", params={"access_token": token})
+        assert res.status_code == 401
+
+
+def test_wopi_auth_gate_off_by_default(client):
+    """Default config keeps the same-network local host flow working
+    without tokens (validated contract: validate_wopi_e2e.sh + rig)."""
+    _seed_doc(client, "docB")
+    res = client.get("/wopi/files/docB")
+    assert res.status_code == 200

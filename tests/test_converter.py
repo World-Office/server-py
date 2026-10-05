@@ -7,8 +7,10 @@ from __future__ import annotations
 
 import base64
 import io
+import json
 import re
 import struct
+import pytest
 import zipfile
 import zlib
 
@@ -17,7 +19,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Emu
 
-from src.editor.converter import docx_to_html, html_to_docx
+from src.editor.converter import _linear_to_omml, docx_to_html, html_to_docx
 from src.editor.odt_converter import html_to_odt, odt_to_html
 
 
@@ -850,7 +852,7 @@ def test_sanitize_keeps_section_columns_toc_object_markers():
 def test_editor_markers_survive_save_then_convert():
     """Exact HTML the editor emits for each new feature survives the
     sanitize (save) -> DOCX -> HTML round-trip with the marker intact."""
-    from src.editor.converter import docx_to_html, html_to_docx
+    from src.editor.converter import _linear_to_omml, docx_to_html, html_to_docx
     from src.editor.sanitize import sanitize_html
 
     cases = [
@@ -1329,7 +1331,12 @@ def test_html_to_docx_object_roundtrip():
         html += f'>{content}</div><p>After</p>'
         docx = html_to_docx(html)
         out = docx_to_html(docx)
-        assert f'data-type="{typ}"' in out, (typ, out)
+        # Equations read back as the editable vector-object img (upgraded
+        # contract); the other object types keep the data-type marker.
+        marker = 'data-kind\u003d"equation"' if typ == "equation" else f'data-type="{typ}"'
+        assert marker in out, (typ, out)
+        if typ == "equation":
+            assert "E=mc^2" in out
 
 
 def test_html_to_docx_bookmark_roundtrip():
@@ -1390,7 +1397,7 @@ def test_sanitize_keeps_bookmark_crossref_markers():
 
 def test_bookmark_crossref_survive_save_then_convert():
     """Editor bookmark HTML survives sanitize (save) -> DOCX/ODT -> HTML."""
-    from src.editor.converter import docx_to_html, html_to_docx
+    from src.editor.converter import _linear_to_omml, docx_to_html, html_to_docx
     from src.editor.odt_converter import html_to_odt, odt_to_html
     from src.editor.sanitize import sanitize_html
 
@@ -1405,7 +1412,7 @@ def test_bookmark_crossref_survive_save_then_convert():
 def test_track_changes_markers_survive_save_then_convert():
     """Editor track-change markup (<ins>/<del>) survives sanitize (save) and
     round-trips through DOCX and ODT with the change intact."""
-    from src.editor.converter import docx_to_html, html_to_docx
+    from src.editor.converter import _linear_to_omml, docx_to_html, html_to_docx
     from src.editor.odt_converter import html_to_odt, odt_to_html
     from src.editor.sanitize import sanitize_html
 
@@ -1421,7 +1428,7 @@ def test_track_changes_markers_survive_save_then_convert():
 def test_comment_markers_survive_save_then_convert():
     """Editor comment markup (<span class="comment" data-author data-comment>)
     survives sanitize (save) and round-trips through DOCX and ODT."""
-    from src.editor.converter import docx_to_html, html_to_docx
+    from src.editor.converter import _linear_to_omml, docx_to_html, html_to_docx
     from src.editor.odt_converter import html_to_odt, odt_to_html
     from src.editor.sanitize import sanitize_html
 
@@ -1458,3 +1465,150 @@ def test_docx_without_sectpr_does_not_crash():
     html = docx_to_html(buf.getvalue())
     assert isinstance(html, str)
     assert "hi" in html
+
+
+def test_field_span_roundtrips_as_live_field():
+    """Insert > Field: <span class="field" data-field="X">render</span> must
+    come back as the same field-carrying span, not flattened text."""
+    html = ('<p>A <span class="field" data-field="DATE">8/21/2026</span> '
+            'and <span class="field" data-field="PAGE">3</span>.</p>')
+    docx = html_to_docx(html)
+    # The DOCX carries real w:fldSimple instructions, not the raw marker.
+    xml = zipfile.ZipFile(io.BytesIO(docx)).read("word/document.xml").decode()
+    assert 'w:instr=" DATE "' in xml or 'w:instr=" PAGE "' in xml
+    out = docx_to_html(docx)
+    assert 'data-field="DATE"' in out and "8/21/2026" in out
+    assert 'data-field="PAGE"' in out
+
+
+def test_unknown_field_instruction_is_dropped():
+    """Hostile/unsupported instr strings never reach the document."""
+    docx = html_to_docx('<p><span class="field" data-field="IMPORT evil">x</span></p>')
+    out = docx_to_html(docx)
+    assert "evil" not in out
+
+
+def test_content_control_roundtrips_as_sdt():
+    """Content controls become real w:sdt blocks and come back."""
+    html = ('<p>Buy <span class="content-control" data-cc="plain" title="Company">ACME</span> '
+            '<span class="content-control" data-cc="dropdown" title="Status">Draft</span>.</p>')
+    docx = html_to_docx(html)
+    xml = zipfile.ZipFile(io.BytesIO(docx)).read("word/document.xml").decode()
+    assert "w:alias" in xml and "Company" in xml
+    out = docx_to_html(docx)
+    assert 'data-cc="plain"' in out and "ACME" in out
+    assert 'data-cc="dropdown"' in out and "Draft" in out
+
+
+def test_floated_image_roundtrips_as_anchored_drawing():
+    """obj-square / obj-behind images must become anchored wp:drawing and
+    keep their float classes through a DOCX round-trip."""
+    png = ("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8"
+           "/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg==")
+    html = (f'<p>A <img class="obj-square" src="data:image/png;base64,{png}" '
+            f'width="80" alt="f"> B <img class="obj-behind" '
+            f'src="data:image/png;base64,{png}" width="40" alt="g"> C</p>')
+    docx = html_to_docx(html)
+    zf = zipfile.ZipFile(io.BytesIO(docx))
+    xml = zf.read("word/document.xml").decode()
+    assert xml.count("<wp:anchor ") == 2
+    assert xml.count("<wp:inline ") == 0
+    assert xml.count("wp:wrapSquare") == 1 and xml.count("wp:wrapBehind") == 1
+    out = docx_to_html(docx)
+    assert 'class="obj-square"' in out and 'class="obj-behind"' in out
+    assert 'alt="f"' in out and 'alt="g"' in out
+
+
+# ---------------------------------------------------------------------------
+# DrawingML chart parts (real editable charts) + OMML equations
+# ---------------------------------------------------------------------------
+
+def _vector_img(kind: str, spec: dict, alt="x") -> str:
+    import base64 as _b64
+    svg = ("<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10'>"
+           "<rect width='10' height='10' fill='#fff'/></svg>")
+    src = "data:image/svg+xml;base64," + _b64.b64encode(svg.encode()).decode()
+    specj = json.dumps(spec).replace('"', "&quot;")
+    return (f'<img class="vector-object" data-kind="{kind}" '
+            f'data-spec="{specj}" src="{src}" width="420" alt="{alt}"/>')
+
+
+@pytest.mark.parametrize("ctype", ["bar", "line", "pie", "area"])
+def test_chart_exports_as_real_drawingml_part(ctype):
+    """Insert > Chart imgs become genuine OPC chart parts, not bitmaps:
+    chartN.xml + content type + relationship + a:graphicData/c:chart ref, so
+    Word/LibreOffice keep the chart data-editable."""
+    spec = {"type": ctype, "title": "Quartal", "rows": [["Q1", 12], ["Q2", 20]], "width": 420}
+    docx = html_to_docx("<p>" + _vector_img("chart", spec) + "</p>")
+    zf = zipfile.ZipFile(io.BytesIO(docx))
+    parts = [n for n in zf.namelist() if n.startswith("word/charts/")]
+    assert parts, "chart OPC part missing"
+    chart_xml = zf.read(parts[0]).decode()
+    assert "barChart" in chart_xml or f"{ctype}Chart" in chart_xml
+    assert "Quartal" in chart_xml and "Q1" in chart_xml and "12" in chart_xml
+    doc = zf.read("word/document.xml").decode()
+    assert "c:chart" in doc  # drawing references the part
+    assert "chart+xml" in zf.read("[Content_Types].xml").decode()
+    rels = zf.read("word/_rels/document.xml.rels").decode()
+    assert "charts/chart1.xml" in rels
+
+
+def test_chart_part_roundtrips_editable_spec():
+    """docx_to_html parses the chart part back into the editable spec, so a
+    reloaded document keeps the chart editable (double-click -> dialog)."""
+    spec = {"type": "line", "title": "Trend", "rows": [["T1", 1], ["T2", 4]], "width": 420}
+    docx = html_to_docx("<p>" + _vector_img("chart", spec) + "</p>")
+    out = docx_to_html(docx)
+    m = re.search(r'data-spec="([^"]+)"', out)
+    assert m, "no editable spec on readback"
+    rt = json.loads(m.group(1).replace("&quot;", '"'))
+    assert rt["type"] == "line" and rt["title"] == "Trend"
+    assert rt["rows"] == [["T1", 1.0], ["T2", 4.0]]
+    assert 'data-kind="chart"' in out and "vector-object" in out
+
+
+def test_equation_img_exports_as_omml():
+    """Insert > Equation imgs become m:oMathPara runs (editable in Word)."""
+    docx = html_to_docx(
+        "<p>" + _vector_img("equation", {"text": "x^2 + a/b - sqrt(2)", "width": 260}) + "</p>"
+    )
+    doc = zipfile.ZipFile(io.BytesIO(docx)).read("word/document.xml").decode()
+    assert "<m:oMathPara" in doc and "m:sSup" in doc and "m:f" in doc and "m:rad" in doc
+
+
+def test_equation_object_div_exports_as_omml():
+    """The <div class='object' data-type='equation'> marker also becomes OMML"""
+    docx = html_to_docx('<div class="object" data-type="equation">y = 2x^2</div>')
+    doc = zipfile.ZipFile(io.BytesIO(docx)).read("word/document.xml").decode()
+    assert "<m:oMathPara" in doc
+
+
+def test_omml_roundtrips_to_equation_marker():
+    """m:oMathPara on a paragraph reads back as the equation marker."""
+    html = "<p>" + _vector_img("equation", {"text": "a^2 + b^2 = c^2", "width": 260}) + "</p>"
+    docx = html_to_docx(html)
+    out = docx_to_html(docx)
+    assert 'data-kind="equation"' in out and "a^2+b^2=c^2" in out
+
+
+def test_linear_to_omml_handles_sup_sub_fraction_sqrt():
+    omml = _linear_to_omml("x^2 + a_1/b - sqrt(2)")
+    assert "m:sSup" in omml and "m:sSub" in omml and "m:f" in omml and "m:rad" in omml
+    # whitespace-insensitive fraction/sqrt (regression: ' / ' upstream text)
+    omml2 = _linear_to_omml("m / s + sqrt( 2 )")
+    assert "m:f" in omml2 and "m:rad" in omml2 and "m:deg" in omml2
+
+
+def test_bare_text_header_footer_survives_docx_roundtrip():
+    """Typing into the header/footer div leaves bare text (no <p> wrapper);
+    the docx conversion must still emit the text, not an empty part."""
+    from src.editor.converter import html_to_docx, docx_to_html
+
+    docx = html_to_docx(
+        '<header class="page-header">Chapter One</header>'
+        "<p>Body</p>"
+        '<footer class="page-footer">Page footer note</footer>'
+    )
+    html = docx_to_html(docx)
+    assert "Chapter One" in html
+    assert "Page footer note" in html

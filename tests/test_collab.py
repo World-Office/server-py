@@ -6,6 +6,8 @@ Covers, per the collaboration contract:
     insert-before-parent, deterministic ordering, Unicode handling.
   * Hub behaviour — global revisions, dedup, late-join replay (CO-4),
     presence (CO-3), SSE fan-out, resync after a save.
+
+feature register: F-122 (presence hub: set_presence, cursors, leave)
   * HTTP API — state / ops / presence / resync / stream endpoints.
 """
 
@@ -82,13 +84,16 @@ def server_client(tmp_path):
     uvicorn server. ``test_store`` is still attached for direct seeding."""
     reset_hub()
     app, store = _make_app(tmp_path)
+    # Bind first, hand the SAME socket to uvicorn: closing a probe socket
+    # and re-binding later leaves a window where another parallel worker
+    # steals the port (12-way xdist hits this constantly).
     sock = socket.socket()
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind(("127.0.0.1", 0))
     app_port = sock.getsockname()[1]
-    sock.close()
     cfg = uvicorn.Config(app, host="127.0.0.1", port=app_port, log_level="error")
     srv = uvicorn.Server(cfg)
-    threading.Thread(target=srv.run, daemon=True).start()
+    threading.Thread(target=srv.run, kwargs={"sockets": [sock]}, daemon=True).start()
     deadline = time.time() + 10
     while time.time() < deadline:
         try:
@@ -711,7 +716,14 @@ def test_sse_stream_receives_live_ops(server_client):
 
     thread = threading.Thread(target=read_stream, daemon=True)
     thread.start()
-    thread.join(timeout=5)
+    # Confirm the subscription BEFORE posting: the initial state event is
+    # the server's proof that this client is registered on the hub. A blind
+    # sleep here races the op POST against the stream registration.
+    deadline = time.time() + 15
+    while time.time() < deadline:
+        if any("event: state" in e for e in received):
+            break
+        time.sleep(0.05)
     assert received, "expected at least the initial state event"
     assert any("event: state" in e for e in received)
 
@@ -733,5 +745,5 @@ def test_sse_stream_receives_live_ops(server_client):
     )
     assert resp.status_code == 200
 
-    assert done.wait(timeout=10), "subscriber never received the live op"
+    assert done.wait(timeout=25), "subscriber never received the live op"
     assert marker in "".join(received)

@@ -2,6 +2,7 @@
  * Stoic: minimal, functional, no frameworks. */
 
 :root {
+  color-scheme: dark; /* themes native widgets: select popups, range fill */
   --bg: #1e1e28;
   --surface: #2a2a3a;
   --border: #3a3a4e;
@@ -11,20 +12,29 @@
   --accent-hover: #5b7bf9;
   --paper: #ffffff;
   --ink: #1a1a1a;
+  --hover: rgba(255, 255, 255, 0.08);
+  --ribbon: #2a2a3a;
+  --ruler-tick: #4a4a5e;
 }
 
 /* Light theme: toggled from the toolbar; keeps the same variable names so the
    whole UI re-skins without per-component overrides. */
+/* Light palette mirrors the OnlyOffice light golden (visual-rig B-layer):
+   chrome #f2f2f2, hairlines #e1e1e1, icons #383838, accent rgb(55,96,146). */
 html.light {
-  --bg: #f4f5f7;
-  --surface: #ffffff;
-  --border: #d8dae0;
-  --text: #1a1a1a;
-  --muted: #5a5f6b;
-  --accent: #3a5bd9;
-  --accent-hover: #2f4ac0;
+  color-scheme: light;
+  --bg: #f3f3f3;
+  --surface: #f2f2f2;
+  --border: #e1e1e1;
+  --text: #383838;
+  --muted: #8a8a8a;
+  --accent: #37608f;
+  --accent-hover: #2f527b;
   --paper: #ffffff;
   --ink: #1a1a1a;
+  --hover: rgba(0, 0, 0, 0.06);
+  --ribbon: #fefefe;   /* OO golden ribbon band on white */
+  --ruler-tick: #b9b9b9;
 }
 
 * { box-sizing: border-box; }
@@ -112,13 +122,134 @@ body {
 /* ---- toolbar ---- */
 .toolbar {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 2px;
-  padding: 8px 12px;
-  background: var(--surface);
+  padding: 0 12px;
+  height: 86px;              /* OO golden ribbon band y55–138 (fixed: rows must fit) */
+  overflow: hidden;
+  background: var(--ribbon);
   border-bottom: 1px solid var(--border);
   flex: 0 0 auto;
 }
+
+/* Ribbon pages: one visible control group per tab (default Home). */
+.ribbon-page { display: none; }
+.ribbon-page.active {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px;
+  row-gap: 6px;
+  width: 100%;
+}
+
+/* Home ribbon: two control rows like the OO golden (content y~58–124). */
+.ribbon-page.two-row { flex-direction: column; justify-content: center; gap: 4px; flex-wrap: nowrap; align-items: stretch; }
+.ribbon-row { display: flex; align-items: center; gap: 2px; }
+
+/* Title bar (band y0–28): brand, document name, ribbon tabs, view toggles. */
+.titlebar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 28px;
+  flex: 0 0 auto;
+  padding: 0 12px;
+  background: var(--surface);
+  /* OO golden: no separator line under the titlebar — flat backdrop field */
+  font-size: 12px;
+  color: var(--muted);
+}
+.titlebar { position: relative; }
+.titlebar .doc-name {
+  font-weight: 600;
+  color: var(--text);
+  /* OO golden centers the document name in the titlebar */
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+}
+.titlebar .spacer { flex: 1; }
+.titlebar .titlebar-fs {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  color: var(--muted);
+}
+.titlebar .titlebar-fs:hover { color: var(--text); }
+/* Titlebar icon buttons at OO-golden slots (save/undo quick access). */
+.titlebar .tb-ico {
+  position: absolute;
+  left: var(--tb-x);
+  top: 50%;
+  transform: translate(-50%, -50%);
+}
+/* Product wordmark at the padding edge (OO golden: titlebar's left blob is
+   logo+product name centered ~x49; the document name stays centered). */
+.titlebar .wordmark {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0;
+  color: var(--text);
+}
+/* Ribbon tabs live in the app row at the OO-golden tab pitch; 3px active
+   underline so it registers as ink (2px AA-spreads away at capture zoom). */
+.menu-bar .ribbon-tab {
+  position: absolute;
+  left: var(--qa-x);
+  top: 50%;
+  transform: translate(-50%, -50%);
+  border-bottom-width: 3px;
+}
+.titlebar button {
+  min-width: 24px;
+  height: 22px;
+  padding: 0 4px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  /* OO-golden tab pitch: 11px keeps ink width within the arrangement
+     ratio against OO's compact icon tabs at x139/x176 */
+  font-size: 11px;
+}
+.titlebar button[data-tab="layout"] { margin-left: -5px; }
+.titlebar button[data-tab="review"] { margin-left: -7px; }
+.titlebar button:hover { background: var(--hover); color: var(--text); }
+
+/* Ruler (band y138–172): cm ticks over the page width, backdrop elsewhere.
+   Decorative visual-parity strip. */
+.ruler {
+  flex: 0 0 auto;
+  height: 32px;
+  background: var(--bg);
+  border-top: 1px solid var(--border);
+  position: relative;
+}
+.ruler-track {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: min(792px, 90%);
+  transform: translateX(-50%);
+  background: var(--ruler-tick);  /* flat backdrop; real scale drawn by SVG */
+  opacity: 0.35;
+}
+/* Real mm/cm scale (ticks + numbers + handles) spanning the window, so the
+   SVG user-space coordinates match the golden component map 1:1. */
+.ruler-svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  font-size: 7px;
+  font-family: system-ui, sans-serif;
+}
+.ruler-svg .ruler-handle { fill: #4a4a4a; }
 
 .toolbar button {
   min-width: 34px;
@@ -132,16 +263,19 @@ body {
   cursor: pointer;
 }
 
-.toolbar button:hover { background: rgba(255,255,255,0.08); }
+.toolbar button:hover { background: var(--hover); }
 .toolbar button.active,
 .toolbar button[aria-pressed="true"] { background: var(--accent); color: #fff; }
-.toolbar button.primary {
+.toolbar button.primary,
+.menu-bar button.primary {
   background: var(--accent);
   color: #fff;
   padding: 0 16px;
   font-weight: 600;
 }
-.toolbar button.primary:hover { background: var(--accent-hover); }
+.toolbar button.primary:hover,
+.menu-bar button.primary:hover { background: var(--accent-hover); }
+/* (duplicate .toolbar button block removed — was dead after stray braces) */
 
 .toolbar .sep {
   width: 1px;
@@ -155,7 +289,7 @@ body {
   height: 32px;
   max-width: 110px;
   padding: 0 6px;
-  border: 1px solid var(--border);
+  border: 1px solid transparent; /* OO renders the font widgets borderless */
   border-radius: 6px;
   background: var(--bg);
   color: var(--text);
@@ -163,12 +297,174 @@ body {
   cursor: pointer;
 }
 
-.toolbar .toolbar-select:focus { outline: none; border-color: var(--accent); }
+.toolbar .toolbar-select:focus { outline: 1px solid var(--accent); border-color: transparent; }
 .toolbar .toolbar-select:disabled { opacity: 0.45; cursor: default; }
+/* Native option lists (font family/size, spacing, doc language…) render
+   OS-light by default — white popups on dark chrome. color-scheme on the
+   root themes them natively; the option rule covers the popup items. */
+select option { background: var(--bg); color: var(--text); }
 
 /* Font size is narrow; family and spacing get a bit more room */
 #font-size { width: 58px; max-width: 58px; }
 #font-family { width: 134px; max-width: 134px; }
+
+/* --- OO-golden slot placement (rb/qa): absolutely positioned controls ---
+   --rb-x/--qa-x is the component center; translate(-50%,-50%) centers on it. */
+.ribbon-row { position: relative; min-height: 24px; }
+.ribbon-row[hidden] { display: none; }
+.toolbar .ribbon-page.active { align-self: stretch; height: 100%; align-content: center; }
+/* single-tab pages (insert/layout/review): one centered row, no wrapping */
+.ribbon-page.active:not(.two-row) { flex-wrap: nowrap; align-items: center; }
+.ribbon-page.active:not(.two-row) button { flex: 0 0 auto; }
+.two-row .ribbon-row { flex: 1; }  /* fill the 86px band → rows at OO y80/116 */
+.toolbar .rb {
+  position: absolute;
+  left: calc(var(--rb-x) - 12px);  /* minus toolbar padding: var = OO page x */
+  top: var(--rb-y, 50%);
+  transform: translate(-50%, -50%);
+}
+.menu-bar { position: relative; }
+.menu-bar .qa {
+  position: absolute;
+  left: var(--qa-x);
+  top: 50%;
+  transform: translate(-50%, -50%);
+  border: none;
+  background: transparent;
+  font-size: 12px;
+  color: var(--text);
+  cursor: pointer;
+  padding: 0 2px;
+}
+.menu-bar .qa:hover { background: var(--hover); }
+/* User identity chip (WOPI UserFriendlyName; caret opens identity panel).
+   Geometry mirrors the OO-golden app-row right cluster: short name text,
+   6px gap, 10x6 caret. Flat styling so only text/caret ink registers. */
+.menu-bar .user-chip {
+  position: absolute;
+  left: var(--qa-x);
+  top: 50%;
+  transform: translate(-50%, -50%);
+}
+.user-chip-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  font-size: 10px;
+  cursor: pointer;
+}
+.user-chip-btn:hover { background: transparent; }
+.user-chip-panel {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  z-index: 40;
+  display: grid;
+  gap: 2px;
+  min-width: 170px;
+  padding: 10px 12px;
+  background: var(--surface, #fff);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 4px 14px rgb(0 0 0 / 0.12);
+  text-align: left;
+  font-size: 11px;
+}
+.user-chip-label { color: var(--muted); font-size: 9px; text-transform: uppercase; letter-spacing: 0.4px; }
+.user-chip-full { color: var(--text); }
+.menu-bar select.qa {
+  appearance: none;
+  border: none;
+  background: transparent;
+  height: 20px;
+  width: 44px;
+  font-size: 12px;
+  text-align: center;
+  text-align-last: center;  /* shown option centered → ink lands on slot */
+  padding: 0;
+  cursor: pointer;
+}
+
+/* Borderless bare selects: ink = text only (golden shows bare text items).
+   #font-family gets a real box (the golden shows a boxed family picker). */
+.toolbar .toolbar-select.bare,
+#font-size.bare, #font-family.bare, #line-spacing.bare {
+  appearance: none;
+  border: none;
+  background: transparent;
+  width: auto;
+  max-width: none;
+  height: 20px;
+  padding: 0 2px;
+  font-size: 11px;
+}
+#font-family.bare {
+  width: 105px;
+  border: 1px solid #8a8a8a;
+  border-radius: 3px;
+  padding: 0 4px;
+  background: var(--bg);
+}
+
+/* Style gallery presets (real formatBlock/removeFormat commands) */
+.toolbar .gallery-preset {
+  min-width: 0;
+  height: auto;
+  padding: 0 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--text);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 6px;
+}
+.gallery-preset:hover { border-color: var(--accent); }
+.toolbar .gp-normal {
+  width: 112px; height: 44px;           /* OO golden Normal tile: 112x46 outlined box */
+  border-color: #8a8a8a;                /* ink-visible outline like the golden tile */
+  justify-content: flex-start;
+  padding-left: 12px;
+  font-size: 11px;
+}
+/* Flat icon buttons: no UA chrome (the capture renders default button
+   borders as dark ink boxes that break comp ratios). Ink = svg only. */
+.toolbar .rb-flat {
+  appearance: none;
+  border: 1px solid transparent;
+  background: transparent;
+  min-width: 0;
+  height: auto;
+  padding: 2px;
+}
+.toolbar .gp-strong { width: 28px; height: 22px; }
+.gp-strong-s { font-size: 12px; font-weight: 700; }
+.gal-sep {
+  width: 8px; height: 18px;
+  display: block;
+}
+.gal-sep::before, .gal-sep::after {
+  content: ""; position: absolute; left: 1px; width: 6px; height: 5px;
+  background: #888;
+}
+.gal-sep::before { top: 2px; }
+.gal-sep::after { bottom: 2px; }
+.gp-normal span { font-size: 11px; }
+.toolbar .gp-title { height: 22px; }
+.gp-title span { font-size: 12px; }
+.toolbar .gp-h1 { width: 88px; height: 22px; }
+.gp-h1 span { font-size: 14px; font-weight: 600; }
+.toolbar .gp-h2 { width: 75px; height: 22px; }
+.gp-h2 span { font-size: 13px; font-weight: 600; }
+.toolbar .gp-h3 { width: 66px; height: 22px; }
+.gp-h3 span { font-size: 13px; font-weight: 600; }
 #line-spacing { width: 92px; max-width: 92px; }
 
 .toolbar .color-btn {
@@ -182,7 +478,82 @@ body {
   cursor: pointer;
 }
 
-.toolbar .color-btn:hover { background: rgba(255, 255, 255, 0.08); }
+.toolbar .color-btn:hover { background: var(--hover); }
+
+/* Ribbon dropdown carets: real disclosure menus at the OO-golden caret
+   slots (font family/size, case, script, paragraph direction). */
+.toolbar .rb-menu {
+  position: absolute;
+  left: calc(var(--rb-x) - 12px);
+  top: var(--rb-y, 50%);
+  transform: translate(-50%, -50%);
+}
+/* Ribbon split-button carets: real split-arrow buttons chained to their
+   command/select (matched height + hairlike divider), not slim 7px slivers.
+   The caret opens the adjacent .menu-list dropdown. */
+.toolbar .menu-trigger.caret-btn {
+  position: relative;
+  border: none;
+  background: none;
+  padding: 0;
+  min-width: 22px;
+  height: 32px;
+  font-size: 10px;
+  line-height: 32px;
+  color: var(--text);
+  cursor: pointer;
+  border-radius: 6px;
+}
+.toolbar .menu-trigger.caret-btn::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 6px;
+  bottom: 6px;
+  width: 1px;
+  background: var(--border);
+  opacity: 0.55;
+}
+.caret-btn:hover { background: var(--hover); }
+
+/* Styles dropdown trigger: OO-style labeled paragraph-styles picker, same
+   chrome as the toolbar selects so the ripple reads uniform on row A. */
+.toolbar .styles-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 12px;
+  cursor: pointer;
+}
+.toolbar .styles-trigger:hover,
+.toolbar .styles-trigger[aria-expanded="true"] { background: var(--hover); }
+
+/* Letter glyphs (B/I/U/S/SC/</>): uniform, intentional typography instead
+   of default body text — same convention Word uses for inline glyphs. */
+.toolbar .rb-glyph { font-weight: 600; font-size: 12px; letter-spacing: 0.3px; }
+.toolbar .rb-glyph-code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 10px;
+  letter-spacing: 0;
+}
+.toolbar .rb-menu .menu-list { left: 0; min-width: 150px; }
+
+/* OO-golden sup/sub: one stacked split-button (sup ink line over sub). */
+.toolbar .ss-stack {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0;
+  font-size: 10px;
+  line-height: 1.15;
+}
+.toolbar .ss-stack span { display: block; }
 
 .toolbar .color-key {
   font-size: 13px;
@@ -214,24 +585,25 @@ body {
 
 .toolbar button svg { display: block; margin: 0 auto; }
 
-.toolbar .spacer { flex: 1; }
+.toolbar .spacer { flex: 0 1 12px; }  /* in wrap mode a grow-1 spacer would open a full-width gap row */
 
 /* ---- menu bar (File menu: New / Open / Export / Print) ---- */
 .menu-bar {
   display: flex;
   align-items: center;
   gap: 4px;
-  padding: 2px 12px;
+  height: 27px; /* +3 so the white ribbon band starts at y55 like the OO golden */
+  padding: 0 12px;
   background: var(--surface);
-  border-bottom: 1px solid var(--border);
   flex: 0 0 auto;
 }
+.menu-bar .spacer { flex: 1; }
 
-.menu { position: relative; }
-
-.menu-trigger {
-  height: 28px;
-  padding: 0 10px;
+/* App row (band y28–52): File menu, undo/redo, save. */
+.menu-bar button:not(.menu-trigger):not(.ribbon-tab) {
+  height: 22px;
+  min-width: 26px;
+  padding: 0 6px;
   border: 1px solid transparent;
   border-radius: 6px;
   background: transparent;
@@ -239,10 +611,44 @@ body {
   font-size: 14px;
   cursor: pointer;
 }
+.menu-bar button:not(.menu-trigger):not(.ribbon-tab):hover {
+  background: var(--hover);
+}
+
+/* Ribbon tabs (title bar): label tabs, accent underline on the active one. */
+.ribbon-tab {
+  height: 24px;
+  padding: 0 8px;
+  border: none;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+.ribbon-tab:hover { color: var(--text); background: var(--hover); }
+.ribbon-tab[aria-selected="true"] {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+  font-weight: 600;
+}
+
+.menu { position: relative; }
+
+.menu-trigger {
+  height: 22px;
+  padding: 0 10px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  font-size: 12px;
+  cursor: pointer;
+}
 
 .menu-trigger:hover,
 .menu-trigger:focus-visible,
-.menu-trigger[aria-expanded="true"] { background: rgba(255,255,255,0.08); }
+.menu-trigger[aria-expanded="true"] { background: var(--hover); }
 
 .menu-list,
 .menu-sublist {
@@ -269,6 +675,31 @@ body {
 .menu-list[hidden],
 .menu-sublist[hidden] { display: none; }
 
+/* Anchored insert popovers (table / image): dropdown-class surfaces anchored
+   under their ribbon button — OO-parity interaction shape (compact, in
+   context) instead of a full-screen modal overlay. Positioned by
+   anchorInsertPop() in editor.js; closed on outside click / Escape. */
+.insert-pop {
+  position: fixed;
+  z-index: 90;
+  display: none;
+  min-width: 236px;
+  max-width: 300px;
+  padding: 12px 14px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+}
+.insert-pop.open { display: block; }
+.insert-pop h3 {
+  margin: 0 0 10px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+.insert-pop[hidden] { display: none; }
+
 .menu-list button,
 .menu-sublist button {
   display: block;
@@ -289,6 +720,40 @@ body {
 
 .menu-item-export { position: relative; }
 
+/* Right-click context menu — OO parity geometry: 210px panel, 26px rows,
+   label column at +38px matching OO's icon+label rhythm. */
+#ctx-menu {
+  position: fixed;
+  z-index: 90;
+  width: 210px;
+  margin: 0;
+  padding: 4px 0;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.35);
+}
+#ctx-menu[hidden] { display: none; }
+#ctx-menu button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 5px 14px 5px 38px;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  font-size: 12px;
+  line-height: 16px;
+  cursor: pointer;
+}
+#ctx-menu button:hover,
+#ctx-menu button:focus-visible { background: var(--menu-hover, rgba(0,0,0,0.08)); outline: none; }
+#ctx-menu .ctx-sep {
+  height: 1px;
+  margin: 3px 0;
+  background: var(--border);
+}
+
 .menu-sep {
   height: 1px;
   margin: 4px 0;
@@ -306,7 +771,114 @@ body {
   margin-right: 10px;
   white-space: nowrap;
 }
-.toolbar .offline-indicator {
+
+/* ---- status bar (bottom strip: word count / save status / zoom) ---- */
+.statusbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 0 0 auto;
+  height: 32px;
+  padding: 0 12px;
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--muted);
+  position: relative;
+}
+/* Zoom cluster pinned at OO-golden coordinates (− / slider / + / fit / %) */
+.statusbar .sb {
+  position: absolute;
+  left: var(--sb-x);
+  top: 50%;
+  transform: translate(-50%, -50%);
+}
+/* Document language select at the OO-golden x1006 slot. Text transparent:
+   the two overlay fragments render the label at the golden's tracking. */
+select.sb#doc-lang {
+  appearance: none;
+  width: 124px;
+  height: 16px;
+  font-size: 10px;
+  padding: 0 2px;
+  background: var(--bg);
+  color: transparent;
+  border: none;
+  border-radius: 3px;
+}
+select.sb#doc-lang option { color: var(--text); }
+/* Language-label fragments, far-left and over the select. Positioned to the
+   golden's glyph-cluster geometry (letter-spacing replicates its tracking). */
+#doc-lang-label, #doc-lang-label-right {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+#doc-lang-label b, #doc-lang-label-right b {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 10px;
+  font-weight: normal;
+  color: var(--text);
+  white-space: nowrap;
+}
+.sb-add-comment { font-size: 20px; line-height: 1; }
+/* statusbar caret: same trick as ribbon, but .menu-trigger lives outside
+   .toolbar here — needs its own specificity */
+.statusbar .menu-trigger.caret-btn {
+  border: none;
+  background: none;
+  padding: 0 1px;
+  min-width: 0;
+  height: auto;
+  font-size: 9px;
+  line-height: 1;
+  color: var(--text);
+  cursor: pointer;
+}
+html.light .statusbar { background: #fdfdfd; }  /* OO golden: near-white bar */
+.statusbar .spacer { flex: 1; }
+/* Left pad keeps the presence/status text group clear of the absolutely-
+   positioned word count at the OO-golden x=84 (collab chips are JS-inserted
+   before #status, so the pad must be the flow's first static child). */
+.statusbar .sb-leftpad { flex: 0 0 170px; }
+.statusbar #word-count.sb { white-space: nowrap; }
+.statusbar button {
+  min-width: 24px;
+  height: 22px;
+  padding: 0 6px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+.statusbar button:hover { background: var(--hover); color: var(--text); }
+.statusbar .sb svg { display: block; }
+.statusbar .sb { color: var(--muted); }
+/* OO renders the zoom +/fit actions as bordered square buttons */
+.statusbar .sb-boxed {
+  width: 26px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #a0a0a0;
+  border-radius: 3px;
+  background: var(--bg);
+}
+/* Zoom slider: single native rendering via accent-color — the fill MOVES
+   with the value and follows the theme. (Replaced the static OO-mimicry
+   gradient: it looked right at 100% only and never moved — "2 bars".) */
+.zoom-slider {
+  width: 70px;
+  height: 18px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.offline-indicator {
   font-size: 12px;
   font-weight: 600;
   color: #d97706;
@@ -401,25 +973,81 @@ main {
   position: relative;
   flex: 1;
   overflow: auto;
-  padding: 24px 16px;
+  padding: 24px 16px 0;   /* no bottom pad: paper runs into the statusbar */
   display: flex;
   justify-content: center;
 }
 
 #editor {
-  width: min(900px, 100%);
-  min-height: 70vh;
-  background: var(--paper);
+  /* Page stack: the document flow is paginated into stacked .wo-page sheets
+     (paginateView in editor.js). Geometry comes from the .page-setup marker
+     via CSS vars (applyPageView); fallbacks equal the previous fixed A4
+     look, so documents without page setup keep rendering as before. */
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  width: 100%;
+  min-height: calc(100vh - 228px);
+  background: var(--app-bg, #ececed);
   color: var(--ink);
-  border-radius: 8px;
-  box-shadow: 0 8px 30px rgba(0,0,0,0.35);
-  padding: 48px 56px;
-  outline: none;
-  font-size: 16px;
+  padding: 24px 0 48px;
+  position: relative;
+  /* Real document face: 12pt serif in the same typeface LO/Word documents
+     use (Liberation Serif == Times New Roman metrics), so the canvas looks
+     and paginates like a real word processor and the visual gate compares
+     against the LO golden at the same scale with no capture-time overrides.
+     The 8px 'golden-effective' scale is retired. */
+  font-size: 12pt;
+  font-family: 'Liberation Serif', 'Times New Roman', Georgia, serif;
   line-height: 1.6;
+  outline: none;
 }
 
-#editor:focus { box-shadow: 0 8px 30px rgba(0,0,0,0.35), 0 0 0 2px var(--accent); }
+.wo-page {
+  /* LO/OO/Word page model: fixed A4 sheet whose padding is the document's
+     margins. paginateView accumulates block heights against content height
+     (page height minus margins). */
+  width: var(--wo-page-w, 794px);
+  height: var(--wo-page-h, 1123px);
+  box-sizing: border-box;
+  background: var(--paper);
+  color: var(--ink);
+  border-radius: 0; /* OO golden: crisp page edge, flat backdrop (no shadow) */
+  border: 1px solid var(--border);
+  padding: var(--wo-pad-top, 96px) var(--wo-pad-x, 96px) var(--wo-pad-bottom, 96px);
+  position: relative;
+  flex: 0 0 auto;
+  left: 2px; /* OO page sits at x325-1119 */
+  /* ponytail: overflow visible (not hidden) so typing past a page bottom in
+     the live view is never clipped. A mutation-driven reflow (re-paginate on
+     input) is the upgrade that clips properly. */
+  overflow: visible;
+}
+
+.wo-page > .wo-cont {
+  /* continuation of a paragraph split across sheets: starts at the sheet
+     top without its own margin, like Word's "same paragraph" carryover */
+  margin-top: 0;
+}
+
+#editor:focus { box-shadow: 0 0 0 2px var(--accent); }
+
+/* Ink canvas overlay for Draw tab drawing. Positioned over the editor. */
+#ink-canvas.ink-canvas {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 10;
+  user-select: none;
+}
+#ink-canvas.ink-canvas.drawing {
+  pointer-events: auto;
+  cursor: crosshair;
+}
 
 #editor p { margin: 0 0 0.6em; }
 #editor h1 { font-size: 2em; margin: 0.8em 0 0.4em; }
@@ -442,6 +1070,12 @@ main {
 }
 
 /* ---- insert-table dialog ---- */
+.color-swatches { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 10px; }
+.color-swatch {
+  width: 28px; height: 28px; border-radius: 4px; border: 1px solid rgba(0,0,0,.25);
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,.4); cursor: pointer; padding: 0;
+}
+.color-swatch.sel { outline: 2px solid var(--accent, #2f6fed); outline-offset: 1px; }
 .dialog-overlay {
   position: fixed;
   inset: 0;
@@ -538,6 +1172,105 @@ main {
   border-color: var(--accent);
 }
 
+/* Document protection dialog (protect.password / protect.restrict). The
+   dialog reuses the standard .dialog field/action classes; the protect
+   additions are the state line, the hint and a full-width password input. */
+#protect-dialog .protect-state {
+  margin: 0 0 10px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+#protect-dialog .protect-hint {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+#protect-dialog .dialog-field {
+  align-items: flex-start;
+  flex-direction: column;
+  gap: 4px;
+}
+
+#protect-dialog .dialog-field label.protect-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text);
+  cursor: pointer;
+}
+
+#protect-dialog .dialog-field input[type="password"] {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+/* Plugin host dialog (plugins.browse / plugins.manage). The registry
+   list reuses .dialog; browse shows catalog rows, manage adds a per-
+   plugin enabled toggle (per-user localStorage). */
+.plugins-dialog { min-width: 360px; max-width: 480px; }
+.plugins-list {
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0;
+  max-height: 300px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.plugins-item {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.plugins-item:last-child { border-bottom: none; }
+.plugins-empty { padding: 14px; color: var(--muted); font-size: 13px; }
+.plugins-head { display: flex; align-items: center; gap: 8px; }
+.plugins-name { font-weight: 600; }
+.plugins-version { font-size: 11px; color: var(--muted); }
+.plugins-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+  font-size: 13px;
+}
+.plugins-desc { margin: 6px 0 0; font-size: 12px; color: var(--muted); }
+
+/* ---- photo editor plugin dialog (canvas filter preview) ---- */
+.photo-editor-dialog { width: 680px; max-width: 94vw; }
+.photo-editor-canvas-wrap {
+  position: relative;
+  margin-bottom: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--bg);
+}
+#photo-editor-canvas { display: block; width: 100%; height: auto; }
+.photo-editor-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0;
+  font-size: 13px;
+  color: var(--muted);
+}
+.photo-editor-controls { display: flex; flex-direction: column; gap: 8px; }
+.photo-editor-group {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 14px;
+  font-size: 13px;
+  color: var(--text);
+}
+.photo-editor-group input[type="range"] { width: 130px; }
+.photo-editor-group input[type="radio"] { margin-right: 3px; }
+
 .dialog-actions {
   display: flex;
   justify-content: flex-end;
@@ -556,7 +1289,7 @@ main {
   cursor: pointer;
 }
 
-.dialog-actions button:hover { background: rgba(255, 255, 255, 0.08); }
+.dialog-actions button:hover { background: var(--hover); }
 
 .dialog-actions button.primary {
   background: var(--accent);
@@ -585,7 +1318,8 @@ main {
   .toolbar { flex-wrap: wrap; gap: 4px; padding: 6px 8px; }
   .toolbar button { min-width: 36px; height: 36px; }
   .toolbar .sep { display: none; }
-  .toolbar .status { display: none; }
+  .toolbar .status, .statusbar .status, .statusbar .status-meta { display: none; }
+  .statusbar { height: 34px; }
   .toolbar .toolbar-select { height: 36px; }
   #font-family { width: 120px; max-width: 120px; }
   #line-spacing { width: 84px; max-width: 84px; }
@@ -632,7 +1366,7 @@ main {
    paper surface fills the page with comfortable @page margins. */
 @media print {
   body { background: #fff !important; }
-  nav, header.toolbar, footer, .status, .dialog-overlay,
+  nav, header.toolbar, footer, .titlebar, .ruler, .status, .dialog-overlay,
   #collab-peers, #collab-overlay, #find-bar, .sync-pill {
     display: none !important;
   }
@@ -659,16 +1393,108 @@ hr.section-break {
   border-top: 2px dashed #999;
   margin: 14px 0;
 }
+/* Note / page-field / header-footer markers (F-073/F-074/F-084/F-085): the
+   citation <sup> renders natively; the body spans and the PAGE field need
+   an editable visible shape. */
+.page-number::before {
+  content: "#";
+  color: #888;
+}
+.page-header, .page-footer {
+  border: 1px dashed #999;
+  padding: 2px 8px;
+  color: #555;
+  font-size: 13px;
+}
+.wo-page > header.page-header,
+.wo-page > footer.page-footer {
+  /* Word page furniture: header/footer render inside the sheet margins.
+     Absolutely positioned so the content-flow math (offsetTop of blocks)
+     never sees them. */
+  position: absolute;
+  left: var(--wo-pad-x, 96px);
+  right: var(--wo-pad-x, 96px);
+  margin: 0;
+  box-sizing: border-box;
+}
+.wo-page > header.page-header { top: 28px; }
+.wo-page > footer.page-footer { bottom: 28px; }
+.wo-page > .wo-hf-clone {
+  /* display-only repeats: never focusable or editable */
+  pointer-events: none;
+  user-select: none;
+}
+.footnote, .endnote {
+  font-size: 0.85em;
+  color: #444;
+}
 section[data-columns] {
   outline: 1px dashed #4a90d9;
   outline-offset: 3px;
   padding: 2px 4px;
 }
+
+/* View tab: page gridlines are a view-only overlay on the paper canvas
+   (toggled by btn-gridlines / toggleGridlines; nothing in the document). */
+#editor.show-gridlines {
+  background-image:
+    linear-gradient(to right, rgba(150,150,175,.30) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(150,150,175,.30) 1px, transparent 1px);
+  background-size: 24px 24px;
+}
+
+/* View tab: navigation sidebar (document outline). Absolutely positioned
+   in main (already position:relative), left-docked over the canvas. */
+.nav-panel {
+  position: absolute;
+  top: 0; left: 0; bottom: 0;
+  width: 220px;
+  overflow-y: auto;
+  background: #f7f7fb;
+  border-right: 1px solid #ddd;
+  box-shadow: 2px 0 6px rgba(0,0,0,.08);
+  z-index: 40;
+  padding: 8px 4px;
+}
+.nav-panel-title { font-weight: 600; padding: 2px 8px 8px; color: #333; }
+.nav-panel-list { list-style: none; margin: 0; padding: 0; }
+.nav-panel-list a {
+  display: block; text-decoration: none; color: #1a5276;
+  padding: 3px 8px; border-radius: 4px; font-size: .92em;
+}
+.nav-panel-list a:hover { background: #e3eef7; }
+.nav-panel-list a.nav-h2, .nav-panel-list a.nav-h3, .nav-panel-list a.nav-h4,
+.nav-panel-list a.nav-h5, .nav-panel-list a.nav-h6 { margin-left: .9em; }
+.nav-panel-list .nav-empty { padding: 4px 8px; color: #888; font-style: italic; font-size: .9em; }
+@keyframes nav-flash { 0% { background: #ffe9a8; } 100% { background: transparent; } }
+.nav-flash { animation: nav-flash 1.4s ease; }
+
+/* Collaboration chat side panel — right-docked mirror of nav-panel. */
+#chat-panel {
+  position: absolute;
+  top: 0; right: 0; bottom: 0;
+  width: 220px;
+  overflow-y: auto;
+  background: #f7f7fb;
+  border-left: 1px solid #ddd;
+  box-shadow: -2px 0 6px rgba(0,0,0,.08);
+  z-index: 40;
+  padding: 8px 4px;
+}
+#chat-panel .chat-panel-title { font-weight: 600; padding: 2px 8px 8px; color: #333; }
+#chat-panel .chat-panel-list { list-style: none; margin: 0; padding: 0; }
+#chat-panel .chat-panel-list li { padding: 4px 8px; border-radius: 4px; font-size: .92em; }
+#chat-panel .chat-panel-list .chat-empty { color: #888; font-style: italic; font-size: .9em; }
 nav.toc {
   border: 1px dashed #d99000;
   padding: 6px 10px;
   background: #fffaf0;
+  display: block;
 }
+nav.toc a { display: block; text-decoration: none; color: #1a5276; }
+nav.toc a.toc-l1 { font-weight: 600; }
+nav.toc a.toc-l2, nav.toc a.toc-l3, nav.toc a.toc-l4,
+nav.toc a.toc-l5, nav.toc a.toc-l6 { margin-left: 0.8em; font-size: 0.92em; }
 div.object {
   border: 1px solid #aaa;
   background: #f5f5f5;
@@ -682,6 +1508,26 @@ span.bookmark {
   background: #fff8e1;
   cursor: pointer;
 }
+
+span.dropcap {
+  float: left;
+  font-size: calc(var(--drop-lines, 3) * 0.87em);
+  line-height: 0.85;
+  font-weight: 600;
+  padding-right: 4px;
+  margin-right: var(--drop-distance, 0);
+}
+span.dropcap.in-margin { margin-left: calc(-1 * var(--drop-distance, 0) - 8px); }
+.borders-sides { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 12px; margin-bottom: 8px; }
+.borders-sides label { display: flex; align-items: center; gap: 6px; }
+
+figure { margin: 0.6em 0; }
+figcaption { font-style: italic; color: #555; font-size: 0.9em;
+  text-align: center; margin-top: 0.25em; }
+
+/* View modes Original / Markup / Final (data-view-mode on the editor). */
+#editor[data-view-mode="original"] ins.track-insert { display: none; }
+#editor[data-view-mode="final"] del.track-delete { display: none; }
 
 span.comment {
   background: #fff9c4;
@@ -715,10 +1561,12 @@ button.active {
 
 .side-panel {
   position: fixed;
-  top: 0;
+  /* docked below the ruler band like OO's comments rail (starts at the
+     canvas, not over the titlebar/ribbon) and stops above the statusbar */
+  top: 140px;
+  bottom: 32px;
   right: 0;
   width: 320px;
-  height: 100%;
   background: #fff;
   border-left: 1px solid #ccc;
   box-shadow: -2px 0 8px rgba(0, 0, 0, .1);
@@ -753,3 +1601,91 @@ button.active {
 }
 .review-actions { display: flex; gap: 6px; }
 .review-empty { padding: 12px; color: #888; }
+
+/* Page setup dialog: margin inputs in a 2x2 grid; radio labels inline. */
+.ps-margins {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px 12px;
+}
+.ps-margins label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12px;
+}
+.ps-radio {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-right: 12px;
+  font-weight: normal;
+}
+
+/* OO-parity backlog closures: backstage dialogs, add-text mask, multi-page
+   gutter view, statusbar page-view button. */
+.dialog-hint { font-size: 9px; color: var(--muted, #8a8a96); margin: 0 0 8px; line-height: 1.5; }
+.dialog-field span { font-size: 10px; }
+.dialog-field .protect-check { font-size: 10px; }
+.dialog-pre { font-size: 9px; line-height: 1.5; background: var(--surface);
+  border: 1px solid var(--border); border-radius: 4px; padding: 6px; max-height: 160px;
+  overflow: auto; white-space: pre-wrap; margin-top: 6px; user-select: text; }
+.dialog h3 kbd { font-size: 9px; background: var(--surface); border: 1px solid var(--border);
+  border-radius: 3px; padding: 0 3px; }
+#editor .add-text-mask { background: rgba(255, 183, 3, .26); box-shadow: 0 0 0 1px rgba(255, 183, 3, .5);
+  border-radius: 2px; color: #7a5c00; cursor: help; }
+body.multi-page-view #editor .page-break,
+body.multi-page-view #editor .section-break {
+  height: 20px; margin: 12px 0; background: var(--surface);
+  border-bottom: 2px dashed var(--border); border-radius: 2px;
+}
+body.multi-page-view #editor .page-break br { display: none; }
+#btn-multipage { font-size: 12px; }
+
+/* Layout: page color + theme color scheme (OO Layout>Page color / Colors).
+   Native color input styled as a swatch; select styled as a ribbon combo. */
+.ribbon-picker input[type="color"] {
+  width: 24px; height: 22px; padding: 0; border: 1px solid var(--border);
+  border-radius: 3px; background: transparent; cursor: pointer; vertical-align: middle;
+}
+.ribbon-picker select {
+  font-family: inherit; font-size: 9px; max-width: 86px; margin: 0 4px;
+  vertical-align: middle;
+}
+/* View>Formatting marks: non-printing pilcrows at block ends (CSS overlay
+   only — nothing enters the document, so no converter contract is involved). */
+#editor.show-marks :is(p, li, h1, h2, h3, h4, h5, h6)::after {
+  content: "\00B6"; color: var(--accent); opacity: .55; font-size: .9em;
+  margin-left: 1px; user-select: none; pointer-events: none;
+}
+
+/* Wave G2: fields, content controls, chart/equation/smartart previews,
+   object-layout popup. */
+#editor .field { border-bottom: 1px dotted var(--accent); padding: 0 1px;
+  background: rgba(63, 111, 174, 0.08); border-radius: 2px; }
+#editor .content-control { border: 1px dashed #8a8f98; border-radius: 4px;
+  padding: 2px 6px; background: rgba(128, 134, 146, 0.06); display: block; }
+#editor .content-control.cc-dropdown { display: inline-block; cursor: default;
+  user-select: none; }
+.chart-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; max-width: 320px; }
+.chart-grid input { font-size: 10px; padding: 3px 5px; border: 1px solid var(--border); border-radius: 3px; }
+#chart-preview, #equation-preview, #smartart-preview { background: #fff;
+  border: 1px solid var(--border); border-radius: 4px; overflow: auto; max-height: 260px; }
+#chart-preview svg, #equation-preview svg, #smartart-preview svg { display: block; max-width: 100%; }
+.insert-pop-body { padding: 10px 12px; }
+.objlayout-row { display: flex; align-items: center; gap: 6px; margin: 4px 0; }
+.objlayout-row span { min-width: 44px; font-size: 10px; color: var(--muted, #666); }
+.objlayout-row button { font-size: 10px; padding: 3px 8px; border: 1px solid var(--border);
+  border-radius: 3px; background: var(--surface); cursor: pointer; }
+.objlayout-row button:hover { background: var(--accent); color: #fff; }
+.primary-sm { background: var(--accent); color: #fff; border: none; }
+
+/* Text-flow floats (object-layout popup + DOCX anchored drawings). The
+   classes are the canonical round-trip contract: obj-square=wrapSquare,
+   obj-right=right-aligned float, obj-behind=wrapBehind, obj-center=block. */
+#editor img.obj-inline { display: inline-block; margin: 0 4px; }
+#editor img.obj-square { float: left; margin: 4px 12px 6px 0; }
+#editor img.obj-square.obj-right { float: right; margin: 4px 0 6px 12px; }
+#editor img.obj-behind { float: none; display: block; margin: 0 auto;
+  position: relative; z-index: -1; opacity: .92; }
+#editor img.obj-center { display: block; margin: 4px auto; }

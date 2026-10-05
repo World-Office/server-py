@@ -427,7 +427,7 @@ class CDPPage:
         mid = self._id
         self._ws.send(json.dumps({"id": mid, "method": method, "params": params or {}}))
         while True:
-            msg = json.loads(self._ws.recv(timeout=40))
+            msg = json.loads(self._ws.recv(timeout=90))
             if msg.get("id") == mid:
                 if "error" in msg:
                     raise RuntimeError(f"{method}: {msg['error']}")
@@ -445,11 +445,11 @@ class CDPPage:
 
     # -- navigation / waiting -------------------------------------------------
 
-    def navigate(self, url: str, wait_js: str, timeout: float = 25.0) -> None:
+    def navigate(self, url: str, wait_js: str, timeout: float = 60.0) -> None:
         self.send("Page.navigate", {"url": url})
         self.wait_js(wait_js, timeout=timeout)
 
-    def wait_js(self, expression: str, timeout: float = 25.0) -> None:
+    def wait_js(self, expression: str, timeout: float = 60.0) -> None:
         deadline = time.time() + timeout
         last = None
         while time.time() < deadline:

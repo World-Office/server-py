@@ -14,16 +14,23 @@ Endpoints:
 from __future__ import annotations
 
 import asyncio
+import io
 import json
+import re
 import time
 import urllib.parse
 from pathlib import Path
 
+from docx import Document as DocxDocument
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
 from fastapi import APIRouter, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.templating import Jinja2Templates
 
 from ..ai.review import agent_ops, reject_agent_ops
+from ..ai.propose import propose as ai_propose_run, DEFAULT_MAX_OPS, DEFAULT_MAX_STEPS
+from ..ai.tools import ToolContext
 from ..editor.collab import get_hub
 from ..editor.converter import docx_to_html, html_to_docx
 from ..editor.odt_converter import html_to_odt, odt_to_html
@@ -35,6 +42,7 @@ from ..editor.session import (
     session_from_token,
 )
 from ..lib.store import DocumentStoreError
+from ..wopi.auth import hash_protection_password, verify_protection_password
 from ..wopi.protocol import LOCK_HEADER, invalid_doc_id
 
 router = APIRouter()
@@ -119,6 +127,11 @@ def _parse_launch(request: Request, form: dict | None):
     q = request.query_params
     token = (form or {}).get("access_token") or q.get("access_token")
     wopi_src = q.get("WOPISrc") or (form or {}).get("WOPISrc")
+    if wopi_src and "://" not in wopi_src:
+        # Tolerate scheme-less WOPISrc (dev launches, curl, rigs): urlparse
+        # would otherwise see no scheme/netloc and silently fall back to the
+        # configured wopi_host — CFI would hit the wrong host and 401.
+        wopi_src = f"http://{wopi_src}"
     doc_id = (form or {}).get("file_id")
     if wopi_src:
         parsed = urllib.parse.urlparse(wopi_src)
@@ -157,6 +170,9 @@ def _parse_launch(request: Request, form: dict | None):
                     base_name = file_info.get("BaseFileName") or ""
                     if base_name:
                         session.name = base_name
+                    # WOPI-canonical identity for the titlebar user chip.
+                    if file_info.get("UserFriendlyName"):
+                        session.user_name = file_info["UserFriendlyName"]
                 except Exception as exc:
                     print(f"[launch] CFI failed for {doc_id}: {exc!r}")
                 # Unknown owner still gets an owner-named token (wo:unknown:…)
@@ -232,6 +248,7 @@ async def editor_page(doc_id: str, request: Request) -> HTMLResponse:
             "name": _doc_name(request, doc_id),
             "read_only": read_only,
             "session_id": session_id,
+            "user_name": (session.user_name if session else "") or "",
         },
     )
 
@@ -330,6 +347,17 @@ async def save_document(doc_id: str, request: Request) -> JSONResponse:
 
     # Sanitize before conversion to prevent XSS
     html = sanitize_html(html)
+
+    # Protect enforcement: a restricted document refuses content writes
+    # until protection is lifted via POST /protect (which verifies the
+    # password server-side). This is the real gate — the editor's read-only
+    # veil is UX, this 403 is enforcement.
+    stored = _load_bytes(request, doc_id)
+    if stored and _doc_protection_detail(stored)["restricted"]:
+        return JSONResponse(
+            {"error": "document is protected: restrict editing is on — unprotect to save"},
+            status_code=403,
+        )
 
     session = _session_for(request, doc_id)
     if session and session.read_only:
@@ -488,6 +516,60 @@ async def document_contents(doc_id: str, request: Request) -> Response:
     )
 
 
+@router.get("/api/agents/runs")
+async def agent_runs(request: Request, client_id: str | None = None, doc_id: str | None = None,
+                     limit: int = 100) -> JSONResponse:
+    """Agent run audit rows (E20), newest first, optional filters.
+
+    Every finished AgentRunner run with the store attached leaves a row:
+    who ran, when, on which document, with what step/op budget usage and
+    stop reason. The operator-facing answer to 'what did the agents do?'.
+    """
+    if limit < 1 or limit > 1000:
+        return JSONResponse({"error": "limit must be 1..1000"}, status_code=400)
+    return JSONResponse({
+        "runs": _store(request).list_agent_runs(client_id=client_id, doc_id=doc_id, limit=limit),
+    })
+
+
+@router.get("/api/agents/runs/{run_id}")
+async def agent_run_detail(run_id: int, request: Request) -> JSONResponse:
+    """One agent run with its redacted trace (E20S1).
+
+    The trace keeps structure (calls, arguments, op kinds, results meta)
+    and bounds every text payload — debugging context, not a document
+    mirror.
+    """
+    run = _store(request).get_agent_run(run_id)
+    if run is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    trace = _store(request).get_agent_trace(run_id)
+    run["trace"] = json.loads(trace["payload"]) if trace else None
+    return JSONResponse(run)
+
+
+@router.get("/agents")
+async def agents_dashboard(request: Request):
+    """Agents dashboard (E20S3) — a read-only server-rendered page: per-agent
+    aggregates on top, the most recent runs underneath. Stoic: a page, not a
+    SPA."""
+    store = _store(request)
+    return _templates.TemplateResponse(
+        request,
+        "agents.html",
+        {
+            "summary": store.agent_summary(),
+            "runs": store.list_agent_runs(limit=20),
+        },
+    )
+
+
+@router.get("/api/agents/summary")
+async def agent_summary(request: Request) -> JSONResponse:
+    """Per-agent aggregates over the audit log: runs, ops, docs, last seen."""
+    return JSONResponse({"agents": _store(request).agent_summary()})
+
+
 @router.get("/api/documents/{doc_id}/info")
 async def document_info(doc_id: str, request: Request) -> JSONResponse:
     """Document metadata: name, format, size, timestamps, version.
@@ -576,6 +658,31 @@ async def restore_document_version(doc_id: str, ts: int, request: Request) -> JS
     return JSONResponse({"ok": True, "ts": head_ts})
 
 
+@router.get("/api/documents/{doc_id}/versions/{ts}/content")
+async def version_content(doc_id: str, ts: int, request: Request) -> JSONResponse:
+    """Serve a version's content as plain text (+ html) for the Compare
+    flow (F-103): the editor diffs the current document against this text
+    and renders the delta as tracked changes. Restored by the store on
+    demand (versions are on-disk snapshots)."""
+    if invalid_doc_id(doc_id):
+        return JSONResponse({"error": "Invalid file id"}, status_code=400)
+    if _client(request, doc_id) is not None:
+        return JSONResponse(
+            {"error": "version history is managed by the remote document host"},
+            status_code=400,
+        )
+    store = _store(request)
+    if store.get(doc_id) is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    raw = store.get_version(doc_id, ts)
+    if raw is None:
+        return JSONResponse({"error": "version not found"}, status_code=404)
+    html = docx_to_html(raw) or ""
+    text = re.sub(r"<[^>]+>", " ", html)
+    text = re.sub(r"\s+", " ", text).strip()
+    return JSONResponse({"html": html, "text": text, "ts": ts})
+
+
 @router.put("/api/documents/{doc_id}/contents")
 @router.post("/api/documents/{doc_id}/contents")
 async def put_document_contents(doc_id: str, request: Request) -> JSONResponse:
@@ -604,6 +711,15 @@ async def put_document_contents(doc_id: str, request: Request) -> JSONResponse:
     if session and session.read_only:
         return JSONResponse(
             {"error": "read-only: another user is editing this document"},
+            status_code=403,
+        )
+
+    # Protect enforcement on the raw-bytes write path too (WOPI PutFile): a
+    # restricted document must not be replaceable without lifting protection.
+    stored = _load_bytes(request, doc_id)
+    if stored and _doc_protection_detail(stored)["restricted"]:
+        return JSONResponse(
+            {"error": "document is protected: restrict editing is on — unprotect to write"},
             status_code=403,
         )
 
@@ -701,6 +817,23 @@ async def upload_document(file: UploadFile, request: Request) -> JSONResponse:
     store.init(doc_id, file.filename or "document.docx")
     store.put_content(doc_id, data)
     return JSONResponse({"id": doc_id, "name": file.filename})
+
+
+@router.post("/api/documents/{doc_id}/import-docx")
+async def import_docx(doc_id: str, request: Request, file: UploadFile) -> JSONResponse:
+    """Convert an uploaded .docx to HTML for Insert > Text from File.
+
+    Reuses the same converter as document loading, so the inserted fragment
+    matches what the editor would render for that file. No store mutation.
+    """
+    data = await file.read()
+    if not data:
+        return JSONResponse({"error": "empty file"}, status_code=400)
+    try:
+        html = docx_to_html(data)
+    except Exception as exc:  # converter contract: report, never crash the host
+        return JSONResponse({"error": f"conversion failed: {exc}"}, status_code=422)
+    return JSONResponse({"html": html, "name": file.filename})
 
 
 # ----------------------------------------------------------------------
@@ -957,6 +1090,159 @@ async def ai_review_reject(doc_id: str, request: Request) -> JSONResponse:
     return JSONResponse(reject_agent_ops(hub, doc_id, revs))
 
 
+@router.post("/api/documents/{doc_id}/ai/propose")
+async def ai_propose(doc_id: str, request: Request) -> JSONResponse:
+    """AI proposal: ``{"instruction": str, "model": str?}`` -> applied edit
+    ops. Runs a registered model (``ai.propose.MODEL_REGISTRY``; the server
+    itself never calls a vendor) through the agent tool surface, so every
+    edit is attributed ``agent=ai-propose:<model>`` and lands in ``/ai/review``
+    for per-op accept/reject. Response carries the new ops in text
+    coordinates so an editor can project them as tracked-change spans."""
+    if invalid_doc_id(doc_id):
+        return JSONResponse({"error": "Invalid file id"}, status_code=400)
+    try:
+        payload = json.loads(await request.body())
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return JSONResponse({"error": "invalid JSON"}, status_code=400)
+    if not isinstance(payload, dict):
+        return JSONResponse({"error": "invalid JSON"}, status_code=400)
+    instruction = str(payload.get("instruction") or "").strip()
+    if not instruction:
+        return JSONResponse({"error": "instruction required"}, status_code=400)
+    store = _store(request)
+    if store.get(doc_id) is None:
+        # WOPI-mode documents live on the host until first save; materialize
+        # the current bytes into the store so the agent tool surface (which
+        # reads baselines from the store) sees the same document the hub has.
+        data = _load_bytes(request, doc_id)
+        if not data:
+            return JSONResponse({"error": "Document not found"}, status_code=404)
+        store.init(doc_id, _doc_name(request, doc_id))
+        store.put_content(doc_id, data)
+    cfg = getattr(request.app.state, "config", None)
+    if cfg is not None and not getattr(cfg, "agents_enabled", True):
+        return JSONResponse({"error": "agents disabled"}, status_code=403)
+    hub = get_hub()
+    hub.ensure(doc_id, _collab_base_text(request, doc_id))
+    since_rev = len(hub.ensure(doc_id).log)
+    ctx = ToolContext(
+        store=store,
+        hub=hub,
+        agents_enabled=True if cfg is None else getattr(cfg, "agents_enabled", True),
+    )
+    try:
+        max_steps = min(int(payload.get("max_steps", DEFAULT_MAX_STEPS)), DEFAULT_MAX_STEPS)
+        max_ops = min(int(payload.get("max_ops", DEFAULT_MAX_OPS)), DEFAULT_MAX_OPS)
+    except (TypeError, ValueError):
+        max_steps, max_ops = DEFAULT_MAX_STEPS, DEFAULT_MAX_OPS
+    out = ai_propose_run(
+        ctx, doc_id, instruction,
+        model_name=str(payload.get("model") or "default"),
+        max_steps=max_steps, max_ops=max_ops,
+    )
+    if not out.get("ok"):
+        return JSONResponse(out, status_code=int(out.get("status", 500)))
+    listing = agent_ops(hub, doc_id, since_rev=since_rev)
+    return JSONResponse({**out, "ops": listing["ops"]})
+
+
+# ----------------------------------------------------------------------
+# OCR plugin
+# ----------------------------------------------------------------------
+
+@router.post("/api/documents/{doc_id}/ai/ocr")
+async def ocr_document(doc_id: str, request: Request) -> JSONResponse:
+    """Run OCR on the document via the AI propose pipeline.
+
+    The server routes OCR through the MODEL_REGISTRY pattern (see ai.propose):
+    unregistered model → loud 503, not a silent stub. The OCR instruction
+    is passed to the registered model which should extract text and return it.
+    """
+    if invalid_doc_id(doc_id):
+        return JSONResponse({"error": "Invalid file id"}, status_code=400)
+
+    store = _store(request)
+    if store.get(doc_id) is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+
+    session = _session_for(request, doc_id)
+    if session and session.read_only:
+        return JSONResponse(
+            {"error": "read-only: another user is editing this document"},
+            status_code=403,
+        )
+
+    # OCR goes through the same agent tool surface as ai.propose
+    # It uses the model registry; unknown models surface as 503
+    cfg = getattr(request.app.state, "config", None)
+    if cfg is not None and not getattr(cfg, "agents_enabled", True):
+        return JSONResponse({"error": "agents disabled"}, status_code=403)
+
+    hub = get_hub()
+    data = _load_bytes(request, doc_id)
+    if not data:
+        return JSONResponse({"error": "not found"}, status_code=404)
+
+    # Seed the collaboration state with the document baseline
+    hub.ensure(doc_id, _collab_base_text(request, doc_id))
+
+    # OCR instruction for the model
+    instruction = "Perform OCR on the document, extract all text, and return it as plain text."
+
+    # Run OCR through the propose pipeline (uses MODEL_REGISTRY)
+    max_steps = 8
+    max_ops = 30
+
+    ctx = ToolContext(
+        store=store,
+        hub=hub,
+        agents_enabled=True if cfg is None else getattr(cfg, "agents_enabled", True),
+    )
+
+    out = ai_propose_run(
+        ctx, doc_id, instruction,
+        model_name=str(request.query_params.get("model", "default")),
+        max_steps=max_steps, max_ops=max_ops,
+    )
+
+    if not out.get("ok"):
+        return JSONResponse(out, status_code=int(out.get("status", 500)))
+
+    return JSONResponse({"ok": True, **out})
+
+
+# ----------------------------------------------------------------------
+# Plugin registry
+# ----------------------------------------------------------------------
+
+@router.get("/api/plugins")
+async def list_plugins(request: Request) -> JSONResponse:
+    """Return the installed plugin registry (catalog of hosted plugins).
+
+    Browse lists this catalog; Manage toggles per-plugin enable state.
+    """
+    return JSONResponse({"plugins": _PLUGIN_REGISTRY})
+
+
+# The plugin catalog: every plugin the host ships. OCR and Photo editor
+# are real (see PLAIN web/editor.js photoEditor dialog + /ai/ocr); the
+# list grows when a new plugin host is added.
+_PLUGIN_REGISTRY = [
+    {
+        "id": "ocr",
+        "name": "OCR",
+        "version": "1.0.0",
+        "description": "Extract text from the document via the registered vision model (MODEL_REGISTRY; loud 503 when unregistered).",
+    },
+    {
+        "id": "photoeditor",
+        "name": "Photo editor",
+        "version": "1.0.0",
+        "description": "Canvas 2D filters on the selected image: brightness, contrast, rotate, crop; Save writes the image back.",
+    },
+]
+
+
 # ----------------------------------------------------------------------
 # Locking (editor-level convenience over the WOPI host store)
 # ----------------------------------------------------------------------
@@ -991,3 +1277,197 @@ def _load_bytes(request: Request, doc_id: str) -> bytes | None:
         except Exception:
             return None
     return _store(request).get_content(doc_id)
+
+
+# ----------------------------------------------------------------------
+# Document protection (protect.password / protect.restrict)
+# ----------------------------------------------------------------------
+# Protection is stored in the OFFICE FILE itself — w:documentProtection in
+# settings.xml, the same place Word stores Restrict-Editing — and is changed
+# ONLY through POST /api/documents/{id}/protect, which verifies the current
+# password server-side before any mutation (403 on mismatch). POST /save
+# refuses content writes while the stored document is restricted, so the
+# restriction is enforced at the write path, not as a CSS veil. The HTML
+# editor round-trip never carries protection state: because content saves
+# are rejected while restricted, protection never needs to ride the
+# converters' body markers (the HTML is only convertible again after an
+# authenticated /protect has lifted the restriction).
+#
+# The password scheme is PBKDF2-SHA512 (100k iters, per-document random
+# salt) with hex-encoded w:hash / w:salt; cryptAlgorithmSid 14 is SHA-512
+# and cryptSpinCount mirrors the iteration count for human readers. This is
+# our documented scheme (Word's own finalizer is a different, MD5-based
+# construction, so Word can enforce read-only via w:edit but cannot verify
+# our hash to lift it — a known, documented interop limitation).
+
+
+def _doc_protection_detail(data: bytes | None) -> dict:
+    """Read {edit, restricted, password_set, salt, hash} from a stored DOCX.
+
+    Any parse failure (0-byte/blank docs, ODT bytes, corrupt files) yields
+    the unprotected default — enforcement only ever engages on a valid
+    stored DOCX that actually carries w:documentProtection.
+    """
+    detail = {"edit": "none", "restricted": False, "password_set": False,
+              "salt": None, "hash": None}
+    if not data:
+        return detail
+    try:
+        doc = DocxDocument(io.BytesIO(data))
+        settings = doc.settings.element
+        el = settings.find(qn("w:documentProtection"))
+        if el is None:
+            return detail
+        edit = (el.get(qn("w:edit")) or "none").lower()
+        detail["edit"] = edit
+        detail["restricted"] = edit != "none"
+        detail["salt"] = el.get(qn("w:salt"))
+        detail["hash"] = el.get(qn("w:hash"))
+        detail["password_set"] = bool(detail["hash"])
+    except Exception:
+        pass  # not a readable DOCX / missing part -> unprotected default
+    return detail
+
+
+def _write_doc_protection(data: bytes, *, restrict: bool,
+                          salt_hex: str | None, hash_hex: str | None) -> bytes:
+    """Return new DOCX bytes with w:documentProtection (re)written.
+
+    The element is removed entirely when nothing remains to enforce (no
+    restriction, no password), so unprotecting a document restores the
+    plain file."""
+    doc = DocxDocument(io.BytesIO(data))
+    settings = doc.settings.element
+    el = settings.find(qn("w:documentProtection"))
+    if el is not None:
+        settings.remove(el)
+    if restrict or (salt_hex and hash_hex):
+        el = OxmlElement("w:documentProtection")
+        if restrict:
+            el.set(qn("w:edit"), "readOnly")
+        el.set(qn("w:enforcement"), "1")
+        if salt_hex and hash_hex:
+            el.set(qn("w:hash"), hash_hex)
+            el.set(qn("w:salt"), salt_hex)
+            el.set(qn("w:cryptAlgorithmSid"), "14")
+            el.set(qn("w:cryptSpinCount"), "100000")
+        settings.append(el)
+    buf = io.BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
+
+
+def _persist_protection(request: Request, doc_id: str, data: bytes) -> None:
+    """Persist rewritten document bytes (host store or remote WOPI host)."""
+    client = _client(request, doc_id)
+    if client:
+        client.put_contents(doc_id, data)
+    else:
+        _store(request).put_content(doc_id, data)
+
+
+@router.get("/api/documents/{doc_id}/protect")
+async def document_protect_state(doc_id: str, request: Request) -> JSONResponse:
+    """Current protection state — booleans only, never the hash/salt."""
+    if invalid_doc_id(doc_id):
+        return JSONResponse({"error": "Invalid file id"}, status_code=400)
+    data = _load_bytes(request, doc_id)
+    if data is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    if _document_format(request, doc_id) == "odt":
+        return JSONResponse(
+            {"error": "document protection is a DOCX feature; not available for ODT"},
+            status_code=400,
+        )
+    d = _doc_protection_detail(data)
+    return JSONResponse({"restrict_editing": d["restricted"], "password_set": d["password_set"]})
+
+
+@router.post("/api/documents/{doc_id}/protect")
+async def document_protect(doc_id: str, request: Request) -> JSONResponse:
+    """Change protection. Body: ``{"restrict_editing": bool,
+    "password": str|null, "clear_password": bool, "current_password": str|null}``.
+
+    Any state change that removes an established password (changing it,
+    clearing it, or lifting the restriction it enforces) must present the
+    current password — the server verifies it against the stored hash and
+    answers 403 on mismatch. Real enforcement: a restricted document also
+    refuses content saves until protection is lifted here."""
+    if invalid_doc_id(doc_id):
+        return JSONResponse({"error": "Invalid file id"}, status_code=400)
+    data = _load_bytes(request, doc_id)
+    if data is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    if _document_format(request, doc_id) == "odt":
+        return JSONResponse(
+            {"error": "document protection is a DOCX feature; not available for ODT"},
+            status_code=400,
+        )
+    session = _session_for(request, doc_id)
+    if session and session.read_only:
+        return JSONResponse(
+            {"error": "read-only: another user is editing this document"},
+            status_code=403,
+        )
+    try:
+        payload = json.loads(await request.body())
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return JSONResponse({"error": "invalid JSON"}, status_code=400)
+    if not isinstance(payload, dict):
+        return JSONResponse({"error": "invalid JSON body: expected an object"}, status_code=400)
+    restrict = payload.get("restrict_editing")
+    if not isinstance(restrict, bool):
+        return JSONResponse({"error": "restrict_editing must be a boolean"}, status_code=400)
+    new_password: str | None = None
+    password = payload.get("password")
+    if password is not None:
+        if not isinstance(password, str):
+            return JSONResponse({"error": "password must be a string"}, status_code=400)
+        if password:
+            new_password = password
+    clear_password = bool(payload.get("clear_password"))
+    if new_password is not None and clear_password:
+        return JSONResponse(
+            {"error": "cannot both set and clear the password"}, status_code=400)
+    current_password = payload.get("current_password")
+    if current_password is not None and not isinstance(current_password, str):
+        return JSONResponse({"error": "current_password must be a string"}, status_code=400)
+
+    detail = _doc_protection_detail(data)
+    # Removing/changing an established password, or lifting the restriction
+    # it enforces, requires the current password (server-side check).
+    drops_enforcement = detail["password_set"] and (
+        new_password is not None or clear_password
+        or (not restrict and detail["restricted"])
+    )
+    if drops_enforcement:
+        supplied = current_password if isinstance(current_password, str) else ""
+        if not verify_protection_password(supplied, detail["salt"] or "", detail["hash"] or ""):
+            return JSONResponse(
+                {"error": "document is password-protected: wrong current password"},
+                status_code=403,
+            )
+
+    final_restrict = restrict
+    if not restrict:
+        final_salt = final_hash = None  # un-restricting drops enforcement entirely
+    elif new_password is not None:
+        final_salt, final_hash = hash_protection_password(new_password)
+    elif clear_password:
+        final_salt = final_hash = None
+    elif detail["password_set"]:
+        final_salt, final_hash = detail["salt"], detail["hash"]
+    else:
+        final_salt = final_hash = None
+
+    try:
+        out = _write_doc_protection(
+            data, restrict=final_restrict, salt_hex=final_salt, hash_hex=final_hash)
+    except Exception as exc:
+        return JSONResponse({"error": f"protection write failed: {exc}"}, status_code=500)
+    _persist_protection(request, doc_id, out)
+    return JSONResponse({
+        "ok": True,
+        "restrict_editing": final_restrict,
+        "password_set": final_hash is not None,
+    })

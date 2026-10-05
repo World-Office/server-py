@@ -49,13 +49,14 @@ def test_discovery_concurrent_requests_ok():
 
 @pytest.mark.wopi
 def test_editor_static_assets_served():
-    idx = requests.get(f"{EDITOR_BASE}/word/", timeout=15, verify=False)
+    idx = requests.get(f"{EDITOR_BASE}/editor", timeout=15, verify=False)
     assert idx.status_code == 200
     import re
 
-    assets = re.findall(r'assets/index-[\w-]+\.js', idx.text)
+    # \b so `.json` is not matched as a `.js` prefix (manifest.json!)
+    assets = re.findall(r'/static/[\w.-]+\.js\b', idx.text)
     assert assets, "no JS bundle referenced"
-    r = requests.get(f"{EDITOR_BASE}/word/{assets[0]}", timeout=15, verify=False)
+    r = requests.get(f"{EDITOR_BASE}{assets[0]}", timeout=15, verify=False)
     assert r.status_code == 200
     assert len(r.content) > 10_000, "JS bundle suspiciously small"
 

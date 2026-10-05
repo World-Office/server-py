@@ -61,6 +61,7 @@ def client(tmp_path):
     with TestClient(app) as c:
         c.test_store = store  # type: ignore[attr-defined]
         yield c
+    store.close()
     wipe_db(db)
     wipe_dir(content)
     reset_hub()
@@ -90,7 +91,7 @@ def _assert_golden(name: str, canonical: str) -> None:
         f"golden file {golden_path} missing — generate with "
         f"UPDATE_GOLDEN=1 uv run pytest tests/test_snapshot_golden.py"
     )
-    golden = golden_path.read_text()
+    golden = golden_path.read_text(encoding="utf-8")
     if canonical != golden:
         diff = "".join(
             difflib.unified_diff(

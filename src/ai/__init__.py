@@ -4,7 +4,7 @@ Agents are **collaboration clients, not a new primitive**: they read and edit
 documents through the same store, WOPI lock plane, and CRDT op pipeline that
 human editors use. This package adds:
 
-* :mod:`ai.tools`     — the five agent tools (read_doc, apply_ops,
+* :mod:`ai.tools`     — the seven agent tools (read_doc, apply_ops, get_context, search_doc,
   get_versions, lock, presence) mapped onto DocumentStore + CollabHub.
 * :mod:`ai.schemas`   — model-agnostic, versioned tool schemas (plain JSON
   Schema; no vendor-specific fields).

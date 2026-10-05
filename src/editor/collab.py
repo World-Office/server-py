@@ -326,13 +326,15 @@ class TextCRDT:
         if self._order_cache is not None:
             return self._order_cache
         ids: list[tuple[str, int]] = []
-
-        def walk(origin: tuple[str, int]) -> None:
-            for iid in self._children.get(origin, ()):
+        # Iterative pre-order DFS — same fix as to_string: one-chain-per-char
+        # trees overflow the interpreter stack with a recursive walk.
+        stack: list[tuple[str, int]] = [ROOT]
+        while stack:
+            iid = stack.pop()
+            if iid is not ROOT:
                 ids.append(iid)
-                walk(iid)
-
-        walk(ROOT)
+            children = self._children.get(iid, ())
+            stack.extend(reversed(children))
         self._order_cache = ids
         return ids
 
@@ -365,15 +367,18 @@ class TextCRDT:
         if self._text_cache is not None:
             return self._text_cache
         out: list[str] = []
-
-        def walk(origin: tuple[str, int]) -> None:
-            for iid in self._children.get(origin, ()):
+        # Iterative pre-order DFS: sequential text chains one node per
+        # character, so a recursive walk overflowed the interpreter stack
+        # for any document beyond ~950 chars. Same order, bounded stack.
+        stack: list[tuple[str, int]] = [ROOT]
+        while stack:
+            iid = stack.pop()
+            if iid is not ROOT:
                 item = self.items[iid]
                 if item.alive:
                     out.append(item.char)
-                walk(iid)
-
-        walk(ROOT)
+            children = self._children.get(iid, ())
+            stack.extend(reversed(children))
         self._text_cache = "".join(out)
         return self._text_cache
 

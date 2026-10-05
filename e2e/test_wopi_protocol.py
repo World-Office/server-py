@@ -25,7 +25,8 @@ def test_discovery_advertises_word_editor():
     r = requests.get(f"{EDITOR_BASE}/hosting/discovery", timeout=15, verify=False)
     assert r.status_code == 200
     xml = r.text
-    assert "World Office" in xml or "word" in xml.lower()
+    # the app provider entry identifies the editor; OpenCloud matches on it
+    assert "WorldOffice" in xml, f"discovery lacks WorldOffice app entry: {xml[:200]}"
     # docx and odt edit actions must carry a urlsrc for the browser flow
     assert "urlsrc" in xml, "discovery actions lack urlsrc"
 
@@ -62,6 +63,6 @@ def test_put_file_rejects_bogus_token():
 
 @pytest.mark.wopi
 def test_editor_ui_bundle_served():
-    r = requests.get(f"{EDITOR_BASE}/word/", timeout=15, verify=False)
+    r = requests.get(f"{EDITOR_BASE}/editor", timeout=15, verify=False)
     assert r.status_code == 200
-    assert "assets/index-" in r.text, "word editor index.html lacks the JS bundle"
+    assert "/static/editor.js" in r.text, "editor page lacks the JS bundle"

@@ -28,6 +28,13 @@ class DocumentStoreError(RuntimeError):
     """Raised on store-level failures (I/O, DB)."""
 
 
+# Live DocumentStore instances by absolute db path, so wipe_db() can close a
+# still-open connection before unlinking the file (Windows refuses to unlink
+# an open SQLite db; Linux tolerates it and we close anyway). Rows are just
+# (path, store) pairs -- the store holds the only reference to its connection.
+_LIVE_STORES: dict[str, "DocumentStore"] = {}
+
+
 class DocumentStore:
     """SQLite-backed metadata index plus file-backed content."""
 
@@ -37,6 +44,7 @@ class DocumentStore:
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._content_dir.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(str(self._db_path), check_same_thread=False)
+        _LIVE_STORES[str(self._db_path.resolve())] = self
         # One shared SQLite connection is used by all threads (HTTP handlers
         # run concurrently), so every DB-touching method serializes through
         # this (reentrant) lock; RLock lets nested calls put_content →
@@ -54,6 +62,12 @@ class DocumentStore:
             raise DocumentStoreError(
                 f"storage unreadable or corrupt at {self._db_path!r}: {exc}"
             ) from exc
+
+    def close(self) -> None:
+        """Close the shared connection (e.g. before a test wipes the db file;
+        Windows cannot unlink an open SQLite db)."""
+        self._conn.close()
+        _LIVE_STORES.pop(str(self._db_path.resolve()), None)
 
     def _init_schema(self) -> None:
         with self._conn:
@@ -78,6 +92,31 @@ class DocumentStore:
                     ts      INTEGER NOT NULL,
                     author  TEXT DEFAULT '',
                     size    INTEGER NOT NULL
+                )
+                """
+            )
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS agent_runs (
+                    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ts             INTEGER NOT NULL,
+                    doc_id         TEXT NOT NULL,
+                    client_id      TEXT NOT NULL,
+                    task           TEXT DEFAULT '',
+                    steps          INTEGER DEFAULT 0,
+                    ops            INTEGER DEFAULT 0,
+                    rev            INTEGER DEFAULT 0,
+                    stopped_reason TEXT DEFAULT ''
+                )
+                """
+            )
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS agent_traces (
+                    id       INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_id   INTEGER NOT NULL,
+                    ts       INTEGER NOT NULL,
+                    payload  TEXT NOT NULL
                 )
                 """
             )
@@ -217,6 +256,109 @@ class DocumentStore:
             ).fetchall()
         return [dict(r) for r in rows]
 
+    # ------------------------------------------------------------------
+    # Agent run audit (E20): every agent turn leaves a row — the op log
+    # says WHAT changed, these rows say WHO ran, WHEN, with what budget.
+    # ------------------------------------------------------------------
+
+    def record_agent_run(
+        self,
+        doc_id: str,
+        client_id: str,
+        task: str = "",
+        steps: int = 0,
+        ops: int = 0,
+        rev: int = 0,
+        stopped_reason: str = "",
+        ts: int | None = None,
+    ) -> int:
+        """Append one audit row for a finished agent run; returns its id."""
+        if ts is None:
+            ts = int(time.time() * 1000)
+        with self._lock:
+            with self._conn:
+                cur = self._conn.execute(
+                    "INSERT INTO agent_runs (ts, doc_id, client_id, task, steps, ops, rev, stopped_reason) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (int(ts), doc_id, client_id, task, int(steps), int(ops), int(rev), str(stopped_reason)),
+                )
+            return int(cur.lastrowid or 0)
+
+    def list_agent_runs(
+        self,
+        client_id: str | None = None,
+        doc_id: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, object]]:
+        """Audit rows, newest first; optional client/doc filters."""
+        where, args = [], []
+        if client_id is not None:
+            where.append("client_id = ?")
+            args.append(client_id)
+        if doc_id is not None:
+            where.append("doc_id = ?")
+            args.append(doc_id)
+        sql = "SELECT id, ts, doc_id, client_id, task, steps, ops, rev, stopped_reason FROM agent_runs"
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY ts DESC, id DESC LIMIT ?"
+        args.append(max(1, min(int(limit), 1000)))
+        with self._lock:
+            rows = self._conn.execute(sql, args).fetchall()
+        return [dict(r) for r in rows]
+
+    def agent_summary(self) -> list[dict[str, object]]:
+        """Per-agent aggregates: runs, ops applied, documents touched."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT client_id, COUNT(*) AS runs, SUM(ops) AS ops, "
+                "COUNT(DISTINCT doc_id) AS docs, MAX(ts) AS last_ts "
+                "FROM agent_runs GROUP BY client_id ORDER BY last_ts DESC",
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_agent_run(self, run_id: int) -> dict[str, object] | None:
+        """One audit row by id, or None."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT id, ts, doc_id, client_id, task, steps, ops, rev, stopped_reason "
+                "FROM agent_runs WHERE id = ?",
+                (int(run_id),),
+            ).fetchone()
+        return dict(row) if row else None
+
+    # Traces (E20S1): redacted transcripts, retention-bounded.
+
+    MAX_TRACES = 100
+
+    def record_agent_trace(self, run_id: int, payload: str, ts: int | None = None) -> int:
+        """Store a redacted transcript JSON for a run; keeps the newest
+        MAX_TRACES rows (retention bound) and returns the trace id."""
+        if ts is None:
+            ts = int(time.time() * 1000)
+        with self._lock:
+            with self._conn:
+                cur = self._conn.execute(
+                    "INSERT INTO agent_traces (run_id, ts, payload) VALUES (?, ?, ?)",
+                    (int(run_id), int(ts), payload),
+                )
+                self._conn.execute(
+                    "DELETE FROM agent_traces WHERE id NOT IN "
+                    "(SELECT id FROM agent_traces ORDER BY id DESC LIMIT ?)",
+                    (self.MAX_TRACES,),
+                )
+            return int(cur.lastrowid or 0)
+
+    def get_agent_trace(self, run_id: int) -> dict[str, object] | None:
+        """The trace row for a run (id, run_id, ts, payload JSON string)."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT id, run_id, ts, payload FROM agent_traces WHERE run_id = ? "
+                "ORDER BY id DESC LIMIT 1",
+                (int(run_id),),
+            ).fetchone()
+        return dict(row) if row else None
+
     def get_version(self, doc_id: str, ts: int) -> bytes | None:
         """Return the snapshot bytes for a version, or None if unknown."""
         f = self._versions_dir(doc_id) / f"{ts}.bin"
@@ -282,13 +424,21 @@ class DocumentStore:
 def wipe_db(db_path: str) -> None:
     """Remove the SQLite file (used by tests / reset)."""
     p = Path(db_path)
+    # Close a still-live store first so its DB file is deletable on Windows
+    # (an open SQLite connection holds the file open).
+    live = _LIVE_STORES.get(str(p.resolve()))
+    if live is not None:
+        live.close()
     if p.exists():
         p.unlink()
     # WAL/shm sidecars
     for suffix in ("-wal", "-shm"):
         side = Path(str(p) + suffix)
         if side.exists():
-            side.unlink()
+            try:
+                side.unlink()
+            except OSError:
+                pass
 
 
 def wipe_dir(path: str) -> None:

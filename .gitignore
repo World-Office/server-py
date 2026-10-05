@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.ruff_cache/
+
+# Data (never commit user content or the real secret)
+data/
+sample.docx
+
+# Local overrides
+.env
+
+# Coverage / scratch
+.coverage
+*.tmp
+
+# local sqlite runtime db — never commit
+mem.db

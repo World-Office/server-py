@@ -1,0 +1,201 @@
+# CI workflow for opencloud-docserver — the Python (FastAPI + WOPI) docserver.
+#
+# Stoic Linux: one process, one job — and one CI pipeline that keeps it honest.
+# Mirrors the local Makefile targets (`make lint`, `make test`) and adds
+# real-HTTP WOPI validation plus a Docker image build + smoke test.
+#
+#   lint          -> uv run ruff check src tests        (matches `make lint`)
+#   test          -> unit lane (parallel) + browser lane (2 workers),
+#                    sequential — matches the phased `make test`
+#   validate-wopi -> boot the server, drive scripts/validate_wopi_e2e.sh
+#                    over real HTTP against the full WOPI host surface
+#   docker-build  -> build the image (Dockerfile) and smoke-test /health
+#
+# NOTE: GitHub Actions only auto-discovers workflows in the repository-root
+# `.github/workflows/`. This component-scoped workflow lives beside the code
+# so the docserver stays self-contained (its own lint/test/build contract);
+# it can be referenced from the root CI, or this file can be copied to
+# `.github/workflows/` if the docserver should gate the whole repo.
+
+name: docserver CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "opencloud-docserver/**"
+      - ".github/workflows/docserver.yml"
+  pull_request:
+    paths:
+      - "opencloud-docserver/**"
+      - ".github/workflows/docserver.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: docserver-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Shared HMAC secret for WOPI JWT tokens (never a real secret in CI).
+  DOCSERVER_JWT_SECRET: ci-test-secret
+  # Deterministic, lighter Hypothesis profile for CI runs (see tests/conftest.py).
+  HYPOTHESIS_PROFILE: ci
+
+jobs:
+  lint:
+    name: Lint (ruff)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        timeout-minutes: 5
+
+      - name: Setup uv (Python 3.12)
+        uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+          enable-cache: true
+        timeout-minutes: 5
+
+      - name: Sync dependencies (frozen lockfile, dev extras)
+        working-directory: opencloud-docserver
+        run: uv sync --frozen --extra dev
+        timeout-minutes: 5
+
+      - name: Ruff lint (src + tests)
+        working-directory: opencloud-docserver
+        run: uv run ruff check src tests
+        timeout-minutes: 5
+
+  test:
+    name: Test (pytest)
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        timeout-minutes: 5
+
+      - name: Setup uv (Python 3.12)
+        uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+          enable-cache: true
+        timeout-minutes: 5
+
+      - name: Sync dependencies (frozen lockfile, dev extras)
+        working-directory: opencloud-docserver
+        run: uv sync --frozen --extra dev
+        timeout-minutes: 5
+
+      - name: Unit lane (pytest, parallel across cores, coverage gate >=85%)
+        working-directory: opencloud-docserver
+        run: uv run pytest -q -n auto --dist loadgroup --ignore=tests/e2e --cov=src --cov-report=term-missing --junitxml=test-results/junit-unit.xml
+        timeout-minutes: 10
+
+      - name: Browser lane (pytest, 2 workers — more starves the host)
+        working-directory: opencloud-docserver
+        run: uv run pytest -q -n 2 tests/e2e --junitxml=test-results/junit-browser.xml
+        timeout-minutes: 10
+
+      - name: Upload JUnit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: docserver-test-results-${{ github.sha }}
+          path: opencloud-docserver/test-results/
+          if-no-files-found: ignore
+          retention-days: 14
+        timeout-minutes: 5
+
+  validate-wopi:
+    name: E2E WOPI validation
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        timeout-minutes: 5
+
+      - name: Setup uv (Python 3.12)
+        uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+          enable-cache: true
+        timeout-minutes: 5
+
+      - name: Sync dependencies (frozen lockfile, dev extras)
+        working-directory: opencloud-docserver
+        run: uv sync --frozen --extra dev
+        timeout-minutes: 5
+
+      - name: Start docserver
+        working-directory: opencloud-docserver
+        run: |
+          set -eu
+          uv run uvicorn src.main:app --host 127.0.0.1 --port 8000 \
+            > /tmp/docserver.log 2>&1 &
+          echo $! > /tmp/docserver.pid
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8000/health >/dev/null 2>&1; then
+              echo "docserver healthy after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "docserver failed to become healthy; log tail:" >&2
+          tail -40 /tmp/docserver.log >&2
+          exit 1
+        timeout-minutes: 5
+
+      - name: Run WOPI E2E validation script
+        working-directory: opencloud-docserver
+        run: BASE=http://127.0.0.1:8000 bash scripts/validate_wopi_e2e.sh
+        timeout-minutes: 10
+
+      - name: Stop docserver
+        if: always()
+        run: |
+          if [ -f /tmp/docserver.pid ]; then
+            kill "$(cat /tmp/docserver.pid)" 2>/dev/null || true
+          fi
+        timeout-minutes: 1
+
+  docker-build:
+    name: Docker build + smoke
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        timeout-minutes: 5
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        timeout-minutes: 5
+
+      - name: Build image (verify Dockerfile)
+        working-directory: opencloud-docserver
+        run: |
+          docker buildx build \
+            --cache-from type=gha \
+            --cache-to type=gha,mode=max \
+            --load -t opencloud-docserver:ci .
+        timeout-minutes: 20
+
+      - name: Smoke test container health
+        run: |
+          set -eu
+          docker run -d --rm --name docserver-smoke \
+            -p 127.0.0.1:8001:8000 opencloud-docserver:ci
+          trap 'docker rm -f docserver-smoke >/dev/null 2>&1 || true' EXIT
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8001/health >/dev/null 2>&1; then
+              echo "container healthy after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "container never became healthy" >&2
+          exit 1
+        timeout-minutes: 10

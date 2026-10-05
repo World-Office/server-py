@@ -32,6 +32,7 @@ class Config:
     wopi_host: str = ""
     data_dir: str = "data"
     agents_enabled: bool = True
+    require_wopi_auth: bool = False
 
     @property
     def document_dir(self) -> str:
@@ -83,6 +84,9 @@ def load_config(path: str | Path = "config.toml") -> Config:
     merged["agents_enabled"] = _first_str(
         "DOCSERVER_AGENTS", _dig(raw, "ai", "enabled"), "true"
     ).lower() not in ("0", "false", "no")
+    merged["require_wopi_auth"] = _first_str(
+        "DOCSERVER_REQUIRE_WOPI_AUTH", _dig(raw, "security", "require_wopi_auth"), "false"
+    ).lower() in ("1", "true", "yes", "on")
     return Config(**merged)
 
 

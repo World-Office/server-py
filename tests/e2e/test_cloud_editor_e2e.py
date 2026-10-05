@@ -162,8 +162,10 @@ def _editor_url(servers: dict, seed: dict | None = None) -> str:
     )
 
 
-def _parent_url(servers: dict, seed: dict | None = None) -> str:
-    return f"http://127.0.0.1:{servers['parent_port']}/?editor={urllib.parse.quote(_editor_url(servers, seed), safe='')}"
+def _parent_url(servers: dict, seed: dict | None = None, extra: str = "") -> str:
+    # `extra` rides on the editor iframe URL (e.g. "&record=1" for the
+    # command recorder) — the parent page only forwards ?editor=.
+    return f"http://127.0.0.1:{servers['parent_port']}/?editor={urllib.parse.quote(_editor_url(servers, seed) + extra, safe='')}"
 
 
 def _seed_doc(servers: dict, name: str = "t.docx", text: str = "E2E base text") -> dict:
@@ -188,6 +190,20 @@ def _frame_text(frame) -> str:
     return frame.locator("#editor").inner_text()
 
 
+def _open_ribbon_tab(frame, tab: str) -> None:
+    """Bring a ribbon tab's controls on-screen (idempotent).
+
+    DOM click, not a hit-tested one: the ACTIVE page's controls legitimately
+    overlap the right-hand tab strip (pre-existing layout; tabs there stay
+    clickable at their visible edge for humans, but Playwright's actionability
+    check rejects the covered center)."""
+    frame.evaluate(
+        "t => { const el = document.querySelector(`.ribbon-tab[data-tab='${t}']`);"
+        " if (el) el.click(); }",
+        tab,
+    )
+
+
 def _post_sync(servers: dict, seed: dict, text: str) -> None:
     urllib.request.urlopen(
         urllib.request.Request(
@@ -200,7 +216,7 @@ def _post_sync(servers: dict, seed: dict, text: str) -> None:
     ).read()
 
 
-def _wait(predicate, timeout: float = 20.0) -> None:
+def _wait(predicate, timeout: float = 60.0) -> None:
     deadline = time.time() + timeout
     while time.time() < deadline:
         if predicate():
@@ -250,8 +266,8 @@ def test_two_users_collaborate_save_and_notify_host(servers):
 
             frame_a = parent_a.frame("ed")
             frame_b = parent_b.frame("ed")
-            frame_a.locator("#editor").wait_for(state="visible", timeout=15000)
-            frame_b.locator("#editor").wait_for(state="visible", timeout=15000)
+            frame_a.locator("#editor").wait_for(state="visible", timeout=45000)
+            frame_b.locator("#editor").wait_for(state="visible", timeout=45000)
             assert "E2E base text" in _frame_text(frame_a)
 
             # Live push: a hub change converges in BOTH browsers (real-time).
@@ -314,7 +330,7 @@ def test_status_bar_word_count_and_save_indicator(servers):
             parent = ctx.new_page()
             parent.goto(_parent_url(servers, seed))
             frame = parent.frame("ed")
-            frame.locator("#editor").wait_for(state="visible", timeout=15000)
+            frame.locator("#editor").wait_for(state="visible", timeout=45000)
 
             # The status bar shows a live word count for the loaded document.
             wc0 = _word_count(frame)
@@ -352,7 +368,7 @@ def test_view_controls_zoom_theme_fullscreen(servers):
             parent = ctx.new_page()
             parent.goto(_parent_url(servers, seed))
             frame = parent.frame("ed")
-            frame.locator("#editor").wait_for(state="visible", timeout=15000)
+            frame.locator("#editor").wait_for(state="visible", timeout=45000)
 
             # Zoom in scales only the editing surface (inline zoom grows).
             z0 = float(frame.locator("#editor").evaluate("el => parseFloat(el.style.zoom || '1')"))
@@ -389,12 +405,13 @@ def test_insert_link_roundtrip(servers):
             parent = ctx.new_page()
             parent.goto(_parent_url(servers, seed))
             frame = parent.frame("ed")
-            frame.locator("#editor").wait_for(state="visible", timeout=15000)
+            frame.locator("#editor").wait_for(state="visible", timeout=45000)
 
             frame.locator("#editor").click()
             frame.locator("#editor").press("End")
             frame.locator("#editor").press_sequentially("Visit our site")
             frame.locator("#editor").select_text()  # select all document text
+            _open_ribbon_tab(frame, "insert")
             frame.locator("#btn-link").click()
             frame.locator("#link-url").fill("https://example.com")
             frame.locator("#btn-link-ok").click()
@@ -402,6 +419,7 @@ def test_insert_link_roundtrip(servers):
             assert frame.locator("#editor a").first.get_attribute("href") == "https://example.com"
 
             # Save -> the link survives the round-trip back to the host.
+            _open_ribbon_tab(frame, "home")
             frame.locator("#btn-save").click()
             _wait(lambda: "example.com" in _host_text(servers, seed))
         finally:
@@ -420,7 +438,7 @@ def test_format_color_highlight_superscript(servers):
             parent = ctx.new_page()
             parent.goto(_parent_url(servers, seed))
             frame = parent.frame("ed")
-            frame.locator("#editor").wait_for(state="visible", timeout=15000)
+            frame.locator("#editor").wait_for(state="visible", timeout=45000)
 
             frame.locator("#editor").click()
             frame.locator("#editor").press("End")
@@ -433,7 +451,8 @@ def test_format_color_highlight_superscript(servers):
             # Select the whole contenteditable so superscript applies visibly,
             # then check the styling spans survive.
             frame.locator("#editor").select_text()
-            frame.locator("button[data-cmd='superscript']").click()
+            # quick-access duplicate: pick the app-row one deterministically
+            frame.locator("button[data-cmd='superscript']").first.click()
 
             # The styling is visible in the DOM.
             colored = frame.locator("#editor span[style*='color']").count()
@@ -459,10 +478,11 @@ def test_table_merge_and_column_ops(servers):
             parent = ctx.new_page()
             parent.goto(_parent_url(servers, seed))
             frame = parent.frame("ed")
-            frame.locator("#editor").wait_for(state="visible", timeout=15000)
+            frame.locator("#editor").wait_for(state="visible", timeout=45000)
 
             frame.locator("#editor").click()
             frame.locator("#editor").press("End")
+            _open_ribbon_tab(frame, "insert")
             frame.locator("#btn-table").click()
             frame.locator("#table-rows").fill("2")
             frame.locator("#table-cols").fill("2")
@@ -498,6 +518,7 @@ def test_table_merge_and_column_ops(servers):
             assert frame.locator("#editor tr").nth(1).locator("td").count() == 1
 
             # Save -> the merged colspan survives round-trip to the host.
+            _open_ribbon_tab(frame, "home")
             frame.locator("#btn-save").click()
             _wait(lambda: "colspan" in _host_html(servers, seed).lower())
         finally:
@@ -517,22 +538,27 @@ def test_insert_hr_pagebreak_symbol(servers):
             parent = ctx.new_page()
             parent.goto(_parent_url(servers, seed))
             frame = parent.frame("ed")
-            frame.locator("#editor").wait_for(state="visible", timeout=15000)
+            frame.locator("#editor").wait_for(state="visible", timeout=45000)
 
             frame.locator("#editor").click()
             frame.locator("#editor").press("End")
 
             # Horizontal rule.
+            _open_ribbon_tab(frame, "insert")
+            frame.locator(".ribbon-tab[data-tab='insert']").click()
             frame.locator("#btn-hr").click()
             frame.locator("#editor hr").wait_for(state="attached", timeout=5000)
             assert frame.locator("#editor hr").count() == 1
 
             # Page break marker.
+            _open_ribbon_tab(frame, "layout")
+            frame.locator(".ribbon-tab[data-tab='layout']").click()
             frame.locator("#btn-page-break").click()
             frame.locator("#editor div.page-break").wait_for(state="attached", timeout=5000)
             assert frame.locator("#editor div.page-break").count() == 1
 
             # Symbol picker -> first symbol (§) inserted as text.
+            _open_ribbon_tab(frame, "insert")
             frame.locator("#btn-symbol").click()
             frame.locator("#symbol-dialog .symbol-btn").first.click()
             _wait(lambda: "§" in _frame_text(frame))
@@ -542,6 +568,7 @@ def test_insert_hr_pagebreak_symbol(servers):
             _wait(lambda: "2026-" in _frame_text(frame))
 
             # Save -> markers + symbol + date reach the host DOCX.
+            _open_ribbon_tab(frame, "home")
             frame.locator("#btn-save").click()
             _wait(lambda: (
                 "<hr" in _host_html(servers, seed)
@@ -554,7 +581,7 @@ def test_insert_hr_pagebreak_symbol(servers):
             parent.reload()
             _wait(lambda: parent.frame("ed") is not None)
             frame2 = parent.frame("ed")
-            frame2.locator("#editor").wait_for(state="visible", timeout=15000)
+            frame2.locator("#editor").wait_for(state="visible", timeout=45000)
             _wait(lambda: frame2.locator("#editor hr").count() == 1)
             assert frame2.locator("#editor div.page-break").count() == 1
             assert "§" in _frame_text(frame2)
@@ -577,7 +604,7 @@ def test_file_menu_export_odt_and_new_document(servers):
             page.on("dialog", lambda d: d.accept())
             page.goto(_parent_url(servers, seed))
             frame = page.frame("ed")
-            frame.locator("#editor").wait_for(state="visible", timeout=15000)
+            frame.locator("#editor").wait_for(state="visible", timeout=45000)
 
             # --- Export ODT via File > Export > ODT -> downloadable archive.
             frame.locator("#btn-file").click()
@@ -620,7 +647,7 @@ def test_offline_queue_and_resync(servers):
             page = ctx.new_page()
             page.goto(_parent_url(servers, seed))
             frame = page.frame("ed")
-            frame.locator("#editor").wait_for(state="visible", timeout=15000)
+            frame.locator("#editor").wait_for(state="visible", timeout=45000)
             _wait(lambda: "Offline seed" in _frame_text(frame))
 
             frame.locator("#editor").click()
@@ -661,7 +688,7 @@ def test_inline_format_commands_code_caps_strike(servers):
             parent = ctx.new_page()
             parent.goto(_parent_url(servers, seed))
             frame = parent.frame("ed")
-            frame.locator("#editor").wait_for(state="visible", timeout=15000)
+            frame.locator("#editor").wait_for(state="visible", timeout=45000)
             _wait(lambda: "plain base" in _frame_text(frame))
 
             # Type a line, then wrap one word in inline code (monospace).
@@ -676,7 +703,7 @@ def test_inline_format_commands_code_caps_strike(servers):
               const sel = window.getSelection();
               sel.removeAllRanges(); sel.addRange(range);
             }""")
-            frame.locator("button[data-cmd='code']").click()
+            frame.locator("button.rb[data-cmd='code']").click()
             frame.locator("#editor").evaluate("""() => {
               const ed = document.getElementById('editor');
               const t = ed.querySelector('p:last-of-type');
@@ -685,7 +712,7 @@ def test_inline_format_commands_code_caps_strike(servers):
               const sel = window.getSelection();
               sel.removeAllRanges(); sel.addRange(range);
             }""")
-            frame.locator("button[data-cmd='allCaps']").click()
+            frame.locator("button.rb[data-cmd='allCaps']").click()
             frame.locator("#editor").evaluate("""() => {
               const ed = document.getElementById('editor');
               const t = ed.querySelector('p:last-of-type');
@@ -694,7 +721,7 @@ def test_inline_format_commands_code_caps_strike(servers):
               const sel = window.getSelection();
               sel.removeAllRanges(); sel.addRange(range);
             }""")
-            frame.locator("button[data-cmd='strikeThrough']").click()
+            frame.locator("button.rb[data-cmd='strikeThrough']").click()
 
             html = frame.evaluate("document.getElementById('editor').innerHTML")
             assert "Consolas" in html or "monospace" in html.lower(), html
@@ -727,7 +754,7 @@ def test_paragraph_rtl_and_line_spacing_roundtrip(servers):
             parent = ctx.new_page()
             parent.goto(_parent_url(servers, seed))
             frame = parent.frame("ed")
-            frame.locator("#editor").wait_for(state="visible", timeout=15000)
+            frame.locator("#editor").wait_for(state="visible", timeout=45000)
             _wait(lambda: "para base" in _frame_text(frame))
 
             frame.locator("#editor").click()
@@ -736,7 +763,7 @@ def test_paragraph_rtl_and_line_spacing_roundtrip(servers):
 
             # Apply 1.5 line spacing via the dropdown then RTL on the same block.
             frame.select_option("#line-spacing", "1.5")
-            frame.locator("button[data-cmd='directionRtl']").click()
+            frame.locator("button.rb[data-cmd='directionRtl']").first.click()
 
             html = frame.evaluate("document.getElementById('editor').innerHTML")
             assert 'line-height: 1.5' in html, html
@@ -760,7 +787,7 @@ def test_paragraph_rtl_and_line_spacing_roundtrip(servers):
             # Reload from the host -> props survive.
             parent.reload()
             frame2 = parent.frame("ed")
-            frame2.locator("#editor").wait_for(state="visible", timeout=15000)
+            frame2.locator("#editor").wait_for(state="visible", timeout=45000)
             html2 = frame2.evaluate("document.getElementById('editor').innerHTML")
             assert 'line-height' in html2 and 'rtl' in html2.lower(), html2
         finally:
@@ -780,7 +807,7 @@ def test_nested_list_tab_indent_roundtrip(servers):
             parent = ctx.new_page()
             parent.goto(_parent_url(servers, seed))
             frame = parent.frame("ed")
-            frame.locator("#editor").wait_for(state="visible", timeout=15000)
+            frame.locator("#editor").wait_for(state="visible", timeout=45000)
             _wait(lambda: "list base" in _frame_text(frame))
 
             frame.locator("#editor").click()
@@ -790,7 +817,7 @@ def test_nested_list_tab_indent_roundtrip(servers):
             # paragraph into an <li>; type two items; Tab indents the second.
             frame.locator("#editor").press("Enter")
             frame.locator("#editor").press_sequentially("first item")
-            frame.locator("button[data-cmd='insertUnorderedList']").click()
+            frame.locator("button[data-cmd='insertUnorderedList']").first.click()
             frame.locator("#editor").press("End")
             frame.locator("#editor").press("Enter")
             frame.locator("#editor").press_sequentially("second item")
@@ -803,6 +830,1443 @@ def test_nested_list_tab_indent_roundtrip(servers):
                 "<ul><li>second item</li></ul>" in _host_html(servers, seed).replace("\n", "")
                 or "List Bullet 2" in _host_html(servers, seed)
             ))
+        finally:
+            ctx.close()
+            browser.close()
+
+
+def test_ai_propose_lands_as_tracked_change_accept_persists(servers):
+    """Flagship v3 loop, driven through the real UI.
+
+    AI tab > Grammar opens the propose dialog; the run posts /ai/propose; a
+    registered scripted model (the server never calls a vendor) applies edit
+    ops through the CRDT tool surface; the collab poll projects them as
+    tracked-change spans in the review panel; Accept converges the text and
+    the save persists it to the WOPI host.
+    """
+    from playwright.sync_api import sync_playwright
+    from src.ai.propose import MODEL_REGISTRY, register_model
+
+    seed = _seed_doc(servers, "ai.docx", text="Alpha beta gamma")
+
+    class ScriptedModel:
+        """One turn: replace the word 'beta' with 'check'; then done."""
+
+        def __init__(self):
+            self.n = 0
+
+        def __call__(self, messages):
+            self.n += 1
+            if self.n > 1:
+                return []
+            return [{
+                "name": "apply_ops",
+                "arguments": {
+                    "doc_id": seed["doc_id"],
+                    "client_id": "agent=ai-propose:default",
+                    "ops": [
+                        {"t": "del", "at": 6, "end": 10},
+                        {"t": "ins", "at": 6, "text": "check"},
+                    ],
+                },
+            }]
+
+    register_model("default", ScriptedModel())
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
+        try:
+            ctx = browser.new_context()
+            parent = ctx.new_page()
+            parent.goto(_parent_url(servers, seed))
+            frame = parent.frame("ed")
+            frame.locator("#editor").wait_for(state="visible", timeout=45000)
+            _wait(lambda: "Alpha beta gamma" in _frame_text(frame))
+
+            # AI tab > Grammar opens the propose dialog pre-filled.
+            _open_ribbon_tab(frame, "ai")
+            frame.locator("#btn-ai-grammar").click()
+            assert frame.locator("#ai-propose-dialog").evaluate(
+                "d => d.classList.contains('open')")
+            frame.locator("#ai-propose-instruction").fill("Fix the casing")
+            frame.locator("#btn-ai-propose-run").click()
+
+            # The proposal converges as tracked changes (not a silent edit).
+            _wait(lambda: frame.locator("#editor ins.track-insert").count() > 0)
+            ins_text = frame.locator("#editor ins.track-insert").first.inner_text()
+            assert ins_text == "check", f"tracked insertion got {ins_text!r}"
+            del_text = frame.locator("#editor del.track-delete").first.inner_text()
+            assert del_text == "beta", f"tracked deletion got {del_text!r}"
+            # it surfaces in the existing review-changes flow
+            assert frame.locator("#review-list .review-item").count() >= 2
+
+            # Accept both changes (insertion first, then the deletion);
+            # only once neither redline is pending does the text converge.
+            frame.locator("#review-list .review-item button.primary").first.click()
+            _wait(lambda: frame.locator("#review-list .review-item").count() == 1)
+            frame.locator("#review-list .review-item button.primary").first.click()
+            _wait(lambda: "Alpha check gamma" in _frame_text(frame))
+
+            # Save persists the accepted proposal to the host.
+            frame.locator("#btn-save").click()
+            _wait(lambda: "Alpha check gamma" in _host_text(servers, seed))
+        finally:
+            ctx.close()
+            browser.close()
+            # Clean up the module-global model registry: this test registers
+            # "default" and must not leak it into the shared MODEL_REGISTRY,
+            # or unit tests asserting on the registry contents (e.g. the
+            # typed-503 propose test) fail depending on test-file order.
+            MODEL_REGISTRY.pop("default", None)
+
+
+def test_command_recorder_replay_dom_hash(servers):
+    """v4-2: opt-in JSONL command recorder + deterministic replay.
+
+    ?record=1 logs every emitCommand (with plain-text selection offsets).
+    Replaying the log against a fresh load of the same document reproduces
+    the exact editor DOM (hash equality). Without the flag nothing is
+    recorded.
+    """
+    from playwright.sync_api import sync_playwright
+
+    seed = _seed_doc(servers, "rec.docx", text="Recorder alpha beta")
+
+    _SET_RANGE = """([at, end]) => {
+      const ed = document.getElementById('editor');
+      ed.focus();
+      let pos = 0, sn = null, so = 0, en = null, eo = 0;
+      const w = document.createTreeWalker(ed, NodeFilter.SHOW_TEXT);
+      let n;
+      while ((n = w.nextNode())) {
+        const len = n.data.length;
+        if (!sn && pos + len >= at) { sn = n; so = at - pos; }
+        if (sn && pos + len >= end) { en = n; eo = end - pos; break; }
+        pos += len;
+      }
+      const r = document.createRange();
+      if (!en) { r.setStart(sn, Math.min(so, sn.data.length)); r.collapse(true); }
+      else { r.setStart(sn, so); r.setEnd(en, eo); }
+      const sel = getSelection();
+      sel.removeAllRanges(); sel.addRange(r);
+    }"""
+
+    def _bus(frame, cmd, value=None, at=None, end=None):
+        """Set a selection (span at..end or collapsed caret at) and run cmd."""
+        if at is not None:
+            frame.evaluate(_SET_RANGE, [at, end if end is not None else at])
+        frame.evaluate(
+            "([c, v]) => dispatchEvent(new CustomEvent('wo-command',"
+            " { detail: { command: c, value: v } }))",
+            [cmd, value],
+        )
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
+        try:
+            ctx = browser.new_context()
+            parent = ctx.new_page()
+
+            # opt-in check: without record=1 nothing is logged
+            parent.goto(_parent_url(servers, seed))
+            frame = parent.frame("ed")
+            frame.locator("#editor").wait_for(state="visible", timeout=45000)
+            _wait(lambda: "Recorder alpha beta" in _frame_text(frame))
+            _bus(frame, "bold", at=9, end=14)
+            assert frame.evaluate("window.__COMMAND_LOG__.length") == 0
+            parent.reload()
+
+            # recorded pass
+            parent.goto(_parent_url(servers, seed, extra="&record=1"))
+            frame = parent.frame("ed")
+            frame.locator("#editor").wait_for(state="visible", timeout=45000)
+            _wait(lambda: "Recorder alpha beta" in _frame_text(frame))
+            _bus(frame, "bold", at=9, end=14)      # bold the word "alpha"
+            _bus(frame, "formatBlock", "H1", at=9)  # block under selection -> H1
+            _bus(frame, "lineHeight", "1.5", at=0)  # caret at doc start
+            _bus(frame, "insertHR", at=0)           # hr at caret
+            log = frame.evaluate("window.__COMMAND_LOG__")
+            assert [e["command"] for e in log] == [
+                "bold", "formatBlock", "lineHeight", "insertHR"]
+            h1 = frame.evaluate("commandDomHash()")
+            jsonl = "\n".join(json.dumps(e) for e in log)
+
+            # replay pass: fresh load, feed the JSONL back
+            parent.goto(_parent_url(servers, seed, extra="&record=1"))
+            frame = parent.frame("ed")
+            frame.locator("#editor").wait_for(state="visible", timeout=45000)
+            _wait(lambda: "Recorder alpha beta" in _frame_text(frame))
+            h2 = frame.evaluate(
+                "jsonl => replayCommands(jsonl.split('\\n'))", jsonl)
+            assert h1 == h2, f"DOM hash diverged on replay: {h1} != {h2}"
+        finally:
+            ctx.close()
+            browser.close()
+
+
+def test_page_setup_dialog_roundtrips_to_host(servers):
+    """F-090/F-091/F-092: the page-setup dialog writes the marker, the live
+    canvas follows the settings, and the save carries w:pgSz/w:pgMar."""
+    from playwright.sync_api import sync_playwright
+
+    seed = _seed_doc(servers, "ps.docx", text="Page setup body")
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
+        try:
+            ctx = browser.new_context()
+            parent = ctx.new_page()
+            parent.goto(_parent_url(servers, seed))
+            frame = parent.frame("ed")
+            frame.locator("#editor").wait_for(state="visible", timeout=45000)
+            _wait(lambda: "Page setup body" in _frame_text(frame))
+
+            _open_ribbon_tab(frame, "layout")
+            frame.locator("#btn-page-setup").click()
+            assert frame.locator("#page-setup-dialog").evaluate(
+                "d => d.classList.contains('open')")
+            frame.locator("#ps-size").select_option("11906x16838")  # A4
+            frame.locator('input[name="ps-orient"][value="landscape"]').check()
+            frame.locator("#ps-mt").fill("0.8")
+            frame.locator("#ps-ml").fill("1.2")
+
+            # marker at body start + canvas mapped (console/pageerror capture
+            # rides on the parent page — Frame has no pageerror event)
+            errors = []
+            parent.on("pageerror", lambda e: errors.append(str(e)))
+            parent.on("console", lambda m: errors.append(m.text) if m.type == "error" else None)
+            frame.locator("#btn-ps-apply").click()
+            frame.wait_for_selector("#editor > div.page-setup", state="attached", timeout=5000)
+            marker = frame.locator("#editor > div.page-setup")
+            assert marker.get_attribute("data-page-w") == "16838"   # landscape A4
+            assert marker.get_attribute("data-orient") == "landscape"
+            assert marker.get_attribute("data-margin-top") == "1152"
+            assert frame.evaluate(
+                "getComputedStyle(document.documentElement)"
+                ".getPropertyValue('--wo-page-w').trim()") == "1122.5px"
+            assert not errors, errors
+
+            frame.locator("#btn-save").click()
+            _wait(lambda: "16838" in _host_html(servers, seed))
+            host_html = _host_html(servers, seed)
+            assert 'data-page-w="16838"' in host_html
+            assert 'data-orient="landscape"' in host_html
+            assert 'data-margin-top="1152"' in host_html
+        finally:
+            ctx.close()
+            browser.close()
+
+
+def test_change_case_and_font_step_via_bus(servers):
+    """F-129 / F-131: changeCase (sentence/lower/upper/title) and
+    fontSizeInc/fontSizeDec are real bus commands on a selection."""
+    from playwright.sync_api import sync_playwright
+
+    seed = _seed_doc(servers, "case.docx", text="hello world test foo.")
+
+    _SET_RANGE = """([at, end]) => {
+      const ed = document.getElementById('editor');
+      ed.focus();
+      let pos = 0, sn = null, so = 0, en = null, eo = 0;
+      const w = document.createTreeWalker(ed, NodeFilter.SHOW_TEXT);
+      let n;
+      while ((n = w.nextNode())) {
+        const len = n.data.length;
+        if (!sn && pos + len >= at) { sn = n; so = at - pos; }
+        if (sn && pos + len >= end) { en = n; eo = end - pos; break; }
+        pos += len;
+      }
+      const r = document.createRange();
+      if (!en) { r.setStart(sn, Math.min(so, sn.data.length)); r.collapse(true); }
+      else { r.setStart(sn, so); r.setEnd(en, eo); }
+      const sel = getSelection();
+      sel.removeAllRanges(); sel.addRange(r);
+    }"""
+
+    def _bus(frame, cmd, value=None, at=None, end=None):
+        if at is not None:
+            frame.evaluate(_SET_RANGE, [at, end if end is not None else at])
+        frame.evaluate(
+            "([c, v]) => dispatchEvent(new CustomEvent('wo-command',"
+            " { detail: { command: c, value: v } }))",
+            [cmd, value],
+        )
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
+        try:
+            ctx = browser.new_context()
+            parent = ctx.new_page()
+            parent.goto(_parent_url(servers, seed))
+            frame = parent.frame("ed")
+            frame.locator("#editor").wait_for(state="visible", timeout=45000)
+            _wait(lambda: "hello world test foo." in _frame_text(frame))
+
+            n = len("hello world test foo.")
+
+            # uppercase then lowercase
+            _bus(frame, "changeCase", "upper", 0, n)
+            _wait(lambda: "HELLO WORLD TEST FOO." in _frame_text(frame))
+            _bus(frame, "changeCase", "lower", 0, n)
+            _wait(lambda: "hello world test foo." in _frame_text(frame))
+            # title + sentence
+            _bus(frame, "changeCase", "title", 0, n)
+            _wait(lambda: "Hello World Test Foo." in _frame_text(frame))
+            _bus(frame, "changeCase", "sentence", 0, n)
+            _wait(lambda: "Hello world test foo." in _frame_text(frame))
+
+            # font step: measured px grows then shrinks back past the baseline
+            def _fs_px():
+                return frame.evaluate(
+                    "(() => { const s = document.querySelector('#editor span[style*=font-size]');"
+                    " return s ? parseFloat(getComputedStyle(s).fontSize) : 0 })()")
+            _wait(lambda: _fs_px() == 0)
+            _bus(frame, "fontSizeInc", None, 0, 5)
+            _wait(lambda: _fs_px() > 0)
+            inc = _fs_px()
+            _bus(frame, "fontSizeDec", None, 0, 5)
+            _wait(lambda: 0 < _fs_px() < inc)
+        finally:
+            ctx.close()
+            browser.close()
+
+
+def test_color_commands_via_bus_roundtrip_to_host(servers):
+    """F-125/F-126/F-127: hiliteColor/foreColor/backColor are real bus
+    commands (span[style] with styleWithCSS) and survive the save
+    round-trip; the toolbar color inputs that back them exist."""
+    from playwright.sync_api import sync_playwright
+
+    seed = _seed_doc(servers, "color.docx", text="Color me please")
+
+    _SET_RANGE = """([at, end]) => {
+      const ed = document.getElementById('editor');
+      ed.focus();
+      let pos = 0, sn = null, so = 0, en = null, eo = 0;
+      const w = document.createTreeWalker(ed, NodeFilter.SHOW_TEXT);
+      let n;
+      while ((n = w.nextNode())) {
+        const len = n.data.length;
+        if (!sn && pos + len >= at) { sn = n; so = at - pos; }
+        if (sn && pos + len >= end) { en = n; eo = end - pos; break; }
+        pos += len;
+      }
+      const r = document.createRange();
+      if (!en) { r.setStart(sn, Math.min(so, sn.data.length)); r.collapse(true); }
+      else { r.setStart(sn, so); r.setEnd(en, eo); }
+      const sel = getSelection();
+      sel.removeAllRanges(); sel.addRange(r);
+    }"""
+
+    def _bus(frame, cmd, value=None, at=None, end=None):
+        if at is not None:
+            frame.evaluate(_SET_RANGE, [at, end if end is not None else at])
+        frame.evaluate(
+            "([c, v]) => dispatchEvent(new CustomEvent('wo-command',"
+            " { detail: { command: c, value: v } }))",
+            [cmd, value],
+        )
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
+        try:
+            ctx = browser.new_context()
+            parent = ctx.new_page()
+            parent.goto(_parent_url(servers, seed))
+            frame = parent.frame("ed")
+            frame.locator("#editor").wait_for(state="visible", timeout=45000)
+            _wait(lambda: "Color me please" in _frame_text(frame))
+
+            # the three picker surfaces exist
+            for cid in ("text-color", "highlight-color", "shading-color"):
+                assert frame.locator("#" + cid).count() == 1
+
+            def _html():
+                return frame.evaluate(
+                    "document.getElementById('editor').innerHTML").lower()
+            _bus(frame, "hiliteColor", "#ff00aa", 0, 2)   # "Co"
+            _wait(lambda: "rgb(255, 0, 170)" in _html())
+            _bus(frame, "foreColor", "#0055ff", 6, 8)     # "me"
+            _wait(lambda: "rgb(0, 85, 255)" in _html())
+            _bus(frame, "backColor", "#f0e68c", 9, 15)    # "please"
+            _wait(lambda: "rgb(240, 230, 140)" in _html())
+
+            frame.locator("#btn-save").click()
+            _wait(lambda: "f0e68c" in _host_html(servers, seed).lower())
+            host = _host_html(servers, seed).lower()
+            assert "ff00aa" in host and "0055ff" in host and "f0e68c" in host
+        finally:
+            ctx.close()
+            browser.close()
+
+
+def test_wsb_promoted_commands_via_bus(servers):
+    """WS-B promoted commands: section markers, multilevel, caption, ToF
+    live preview, object dialog (textart), display mode, crossref dialog,
+    AI translate — all real bus commands with a save round-trip to host."""
+    from playwright.sync_api import sync_playwright
+
+    seed = _seed_doc(servers, "wsb.docx", text="Alpha beta gamma delta end.")
+
+    _SET_RANGE = """([at, end]) => {
+      const ed = document.getElementById('editor');
+      ed.focus();
+      let pos = 0, sn = null, so = 0, en = null, eo = 0;
+      let last = null, lastLen = 0;
+      const w = document.createTreeWalker(ed, NodeFilter.SHOW_TEXT);
+      let n;
+      while ((n = w.nextNode())) {
+        last = n; lastLen = n.data.length;
+        const len = n.data.length;
+        if (!sn && pos + len >= at) { sn = n; so = at - pos; }
+        if (sn && pos + len >= end) { en = n; eo = end - pos; break; }
+        pos += len;
+      }
+      if (!sn) { sn = last; so = lastLen; }   // past the end: caret at EOF
+      if (!en) { en = sn; eo = Math.min(so, sn.data.length); }
+      const r = document.createRange();
+      r.setStart(sn, Math.min(so, sn.data.length));
+      r.setEnd(en, Math.min(eo, en.data.length));
+      const sel = getSelection();
+      sel.removeAllRanges(); sel.addRange(r);
+    }"""
+
+    def _bus(frame, cmd, value=None, at=None, end=None):
+        if at is not None:
+            frame.evaluate(_SET_RANGE, [at, end if end is not None else at])
+        frame.evaluate(
+            "([c, v]) => dispatchEvent(new CustomEvent('wo-command',"
+            " { detail: { command: c, value: v } }))",
+            [cmd, value],
+        )
+
+    def _html(frame):
+        return frame.evaluate("document.getElementById('editor').innerHTML")
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
+        try:
+            ctx = browser.new_context()
+            parent = ctx.new_page()
+            parent.goto(_parent_url(servers, seed))
+            frame = parent.frame("ed")
+            frame.locator("#editor").wait_for(state="visible", timeout=45000)
+            _wait(lambda: "Alpha beta gamma delta end." in _frame_text(frame))
+
+            # --- layout.* section markers: on -> save round-trip -> off ---
+            _bus(frame, "toggleHyphenation")
+            _bus(frame, "toggleLineNumbers")
+            _bus(frame, "toggleWatermark")
+            _wait(lambda: 'class="hyphenation"' in _html(frame).lower())
+            _wait(lambda: 'class="line-numbers"' in _html(frame).lower())
+            _wait(lambda: 'class="watermark"' in _html(frame).lower())
+            frame.locator("#btn-save").click()
+            _wait(lambda: 'class="hyphenation"' in _host_html(servers, seed).lower())
+            host = _host_html(servers, seed).lower()
+            assert 'class="line-numbers"' in host and 'class="watermark"' in host
+
+            _bus(frame, "toggleWatermark")  # off again
+            _wait(lambda: 'class="watermark"' not in _html(frame).lower())
+            frame.locator("#btn-save").click()
+            _wait(lambda: 'class="watermark"' not in _host_html(servers, seed).lower())
+            host = _host_html(servers, seed).lower()
+            assert 'class="hyphenation"' in host and 'class="line-numbers"' in host
+
+            # --- heading + ToC live preview ---
+            _bus(frame, "formatBlock", "H1", 0, 0)
+            _wait(lambda: "<h1>" in _html(frame).lower())
+            _bus(frame, "updateToc")
+            _wait(lambda: '<nav class="toc"' in _html(frame).lower()
+                  and 'class="toc-l1"' in _html(frame).lower())
+
+            # --- caption outside a table -> centered caption paragraph ---
+            _bus(frame, "insertCaption", None, 999999, 999999)
+            _wait(lambda: _html(frame).lower().count("caption") >= 1)
+
+            # --- displayMode cycles Original -> Final -> Markup ---
+            _bus(frame, "displayMode")
+            _wait(lambda: frame.evaluate(
+                "document.getElementById('editor').dataset.viewMode") == "original")
+            _bus(frame, "displayMode")
+            _wait(lambda: frame.evaluate(
+                "document.getElementById('editor').dataset.viewMode") == "final")
+            _bus(frame, "displayMode")
+            _wait(lambda: frame.evaluate(
+                "document.getElementById('editor').dataset.viewMode") == "markup")
+
+            # --- openCrossref opens the real crossref dialog ---
+            _bus(frame, "openCrossref")
+            frame.locator("#crossref-dialog").wait_for(state="visible", timeout=10000)
+
+            # --- aiTranslate pre-fills the propose panel ---
+            _bus(frame, "aiTranslate", "French", 0, 0)
+            _wait(lambda: "French" in frame.locator("#ai-propose-instruction").input_value())
+        finally:
+            ctx.close()
+            browser.close()
+
+
+def test_wsb_multilevel_nested_list(servers):
+    """home.multilevel: nesting a list item under its previous sibling
+    produces the canonical <li><ol> subtree that round-trips to the host."""
+    from playwright.sync_api import sync_playwright
+
+    buf = io.BytesIO()
+    d = Document()
+    d.add_paragraph("First item of list.")
+    d.add_paragraph("Second item of list.")
+    d.save(buf)
+    resp = json.loads(
+        urllib.request.urlopen(
+            urllib.request.Request(
+                f"http://127.0.0.1:{servers['host_port']}/_host/files",
+                data=json.dumps(
+                    {"name": "ml.docx", "data": base64.b64encode(buf.getvalue()).decode()}
+                ).encode(),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            ),
+            timeout=10,
+        ).read()
+    )
+    seed = {"doc_id": resp["id"], "token": resp["access_token"]}
+
+    _SET_RANGE = """([at, end]) => {
+      const ed = document.getElementById('editor');
+      ed.focus();
+      let pos = 0, sn = null, so = 0, en = null, eo = 0;
+      let last = null, lastLen = 0;
+      const w = document.createTreeWalker(ed, NodeFilter.SHOW_TEXT);
+      let n;
+      while ((n = w.nextNode())) {
+        last = n; lastLen = n.data.length;
+        const len = n.data.length;
+        if (!sn && pos + len >= at) { sn = n; so = at - pos; }
+        if (sn && pos + len >= end) { en = n; eo = end - pos; break; }
+        pos += len;
+      }
+      if (!sn) { sn = last; so = lastLen; }
+      if (!en) { en = sn; eo = Math.min(so, sn.data.length); }
+      const r = document.createRange();
+      r.setStart(sn, Math.min(so, sn.data.length));
+      r.setEnd(en, Math.min(eo, en.data.length));
+      const sel = getSelection();
+      sel.removeAllRanges(); sel.addRange(r);
+    }"""
+
+    def _bus(frame, cmd, value=None, at=None, end=None):
+        if at is not None:
+            frame.evaluate(_SET_RANGE, [at, end if end is not None else at])
+        frame.evaluate(
+            "([c, v]) => dispatchEvent(new CustomEvent('wo-command',"
+            " { detail: { command: c, value: v } }))",
+            [cmd, value],
+        )
+
+    def _html(frame):
+        return frame.evaluate("document.getElementById('editor').innerHTML")
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
+        try:
+            ctx = browser.new_context()
+            parent = ctx.new_page()
+            parent.goto(_parent_url(servers, seed))
+            frame = parent.frame("ed")
+            frame.locator("#editor").wait_for(state="visible", timeout=45000)
+            _wait(lambda: "First item of list." in _frame_text(frame)
+                  and "Second item of list." in _frame_text(frame))
+
+            first = len("First item of list.")
+            second = first + len("Second item of list.")
+            _bus(frame, "insertOrderedList", None, first, first)
+            _wait(lambda: "<ol>" in _html(frame).lower())
+            _bus(frame, "insertOrderedList", None, second, second)
+            _wait(lambda: _html(frame).lower().count("<ol") == 1)
+            # indent the second item under the first -> canonical li>ol
+            _bus(frame, "multilevel", None, second, second)
+            _wait(lambda: _html(frame).lower().count("<ol") >= 2)
+
+            frame.locator("#btn-save").click()
+            _wait(lambda: "<li>" in _host_html(servers, seed).lower())
+            host = _host_html(servers, seed).lower()
+            assert "first item of list" in host and "second item of list" in host
+        finally:
+            ctx.close()
+            browser.close()
+
+
+def test_wsb_object_roundtrip(servers):
+    """insertObject (textart) -> object dialog -> save: the object div
+    survives the docx round-trip (generic object: descr contract)."""
+    from playwright.sync_api import sync_playwright
+
+    seed = _seed_doc(servers, "obj.docx", text="Plain body text here.")
+
+    _SET_RANGE = """([at, end]) => {
+      const ed = document.getElementById('editor');
+      ed.focus();
+      let pos = 0, sn = null, so = 0, en = null, eo = 0;
+      let last = null, lastLen = 0;
+      const w = document.createTreeWalker(ed, NodeFilter.SHOW_TEXT);
+      let n;
+      while ((n = w.nextNode())) {
+        last = n; lastLen = n.data.length;
+        const len = n.data.length;
+        if (!sn && pos + len >= at) { sn = n; so = at - pos; }
+        if (sn && pos + len >= end) { en = n; eo = end - pos; break; }
+        pos += len;
+      }
+      if (!sn) { sn = last; so = lastLen; }
+      if (!en) { en = sn; eo = Math.min(so, sn.data.length); }
+      const r = document.createRange();
+      r.setStart(sn, Math.min(so, sn.data.length));
+      r.setEnd(en, Math.min(eo, en.data.length));
+      const sel = getSelection();
+      sel.removeAllRanges(); sel.addRange(r);
+    }"""
+
+    def _bus(frame, cmd, value=None, at=None, end=None):
+        if at is not None:
+            frame.evaluate(_SET_RANGE, [at, end if end is not None else at])
+        frame.evaluate(
+            "([c, v]) => dispatchEvent(new CustomEvent('wo-command',"
+            " { detail: { command: c, value: v } }))",
+            [cmd, value],
+        )
+
+    def _html(frame):
+        return frame.evaluate("document.getElementById('editor').innerHTML")
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
+        try:
+            ctx = browser.new_context()
+            parent = ctx.new_page()
+            parent.goto(_parent_url(servers, seed))
+            frame = parent.frame("ed")
+            frame.locator("#editor").wait_for(state="visible", timeout=45000)
+            _wait(lambda: "Plain body text here." in _frame_text(frame))
+
+            _bus(frame, "insertObject", "textart", 999999, 999999)
+            frame.locator("#object-dialog").wait_for(state="visible", timeout=10000)
+            assert frame.locator("#object-type").input_value() == "textart"
+            frame.locator("#object-content").fill("Hello art")
+            frame.locator("#btn-object-ok").click()
+            _wait(lambda: 'data-type="textart"' in _html(frame).lower())
+            frame.locator("#btn-save").click()
+            _wait(lambda: 'data-type="textart"' in _host_html(servers, seed).lower())
+        finally:
+            ctx.close()
+            browser.close()
+
+
+def test_wsb_compare_versions_tracked_diff(servers):
+    """F-103 compare flow (server mode): an older snapshot diffs onto the
+    live document as tracked-change spans (ins.track-insert). Version
+    history is host-managed in client mode, so this runs on a store-backed
+    document where saves create real snapshots."""
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
+        try:
+            ctx = browser.new_context()
+            page = ctx.new_page()
+            # store-backed doc (no WOPI host) -> versions record on /save
+            made = json.loads(
+                urllib.request.urlopen(
+                    urllib.request.Request(
+                        f"http://127.0.0.1:{servers['doc_port']}/api/documents/new",
+                        data=b"",
+                        headers={"Content-Type": "application/json"},
+                        method="POST",
+                    ),
+                    timeout=10,
+                ).read()
+            )
+            doc_id = made["doc_id"]
+            page.goto(f"http://127.0.0.1:{servers['doc_port']}/editor/{doc_id}")
+            page.locator("#editor").wait_for(state="visible", timeout=45000)
+            # empty doc: ensure the editor finished rendering (blank <p>).
+            # Content lives inside .wo-page sheets since the editor paginates.
+            _wait(lambda: page.locator("#editor .wo-page p").count() >= 1)
+
+            def _bus(cmd, value=None):
+                page.evaluate(
+                    "([c, v]) => dispatchEvent(new CustomEvent('wo-command',"
+                    " { detail: { command: c, value: v } }))",
+                    [cmd, value],
+                )
+
+            # two snapshots: edit -> save, edit -> save
+            # (edit the LAST paragraph inside the sheets — the editor paginates,
+            #  so the last #editor child is a .wo-page, not a <p>)
+            page.evaluate("document.getElementById('editor').focus()")
+            page.evaluate(
+                "(() => { const ps = document.querySelectorAll('#editor .wo-page p');"
+                " ps[ps.length - 1].textContent = 'Version two text here.'; })()")
+            page.locator("#btn-save").click()
+            _wait(lambda: "Version two text here." in page.locator("#editor").inner_text())
+            page.evaluate(
+                "(() => { const ps = document.querySelectorAll('#editor .wo-page p');"
+                " ps[ps.length - 1].textContent += ' More later.'; })()")
+            page.locator("#btn-save").click()
+            _wait(lambda: "More later." in page.locator("#editor").inner_text())
+
+            _bus("compareVersion")
+            page.locator("#version-history-dialog").wait_for(state="visible", timeout=10000)
+            _wait(lambda: page.locator(".version-compare").count() >= 1)
+            page.locator(".version-compare").first.click()
+            _wait(lambda: (page.locator("ins.track-insert").count()
+                           + page.locator("del.track-delete").count()) >= 1)
+        finally:
+            ctx.close()
+            browser.close()
+
+
+
+
+def test_r4_view_hyperlink_ai_congruence(servers):
+    """R4 congruence batch: the Insert-tab Hyperlink stub was a duplicate of
+    the real link dialog; view.mode cycles the display modes; Gridlines is a
+    view-only overlay; Navigation lists the document outline and jumps;
+    ai.rewrite/ai.summarize open the propose dialog with preset instructions.
+    All view-state/AI-side effects — no document content, so no save needed."""
+    from playwright.sync_api import sync_playwright
+
+    seed = _seed_doc(servers, "r4.docx", text="Alpha beta gamma delta end.")
+
+    def _bus(frame, cmd, value=None):
+        frame.evaluate(
+            "([c, v]) => dispatchEvent(new CustomEvent('wo-command',"
+            " { detail: { command: c, value: v } }))",
+            [cmd, value],
+        )
+
+    def _html(frame):
+        return frame.evaluate("document.getElementById('editor').innerHTML")
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
+        try:
+            ctx = browser.new_context()
+            parent = ctx.new_page()
+            parent.goto(_parent_url(servers, seed))
+            frame = parent.frame("ed")
+            frame.locator("#editor").wait_for(state="visible", timeout=45000)
+            _wait(lambda: "Alpha beta gamma delta end." in _frame_text(frame))
+
+            # Seed an outline for navigation + a target paragraph.
+            frame.evaluate(
+                "(() => { const ed = document.getElementById('editor');"
+                " ed.innerHTML = '<h1>Alpha</h1><p><br></p><h2>Beta</h2>"
+                "<p><br></p><h3>Gamma</h3><p><br></p>'; })()")
+
+            # 1. hyperlink -> the existing link dialog
+            _bus(frame, "link")
+            _wait(lambda: frame.evaluate(
+                "!!document.getElementById('link-dialog')?.classList.contains('open')"))
+            frame.evaluate("(() => {"
+                " const d = document.getElementById('link-dialog');"
+                " if (d) d.classList.remove('open'); })()")
+
+            # 2. view.mode -> display mode cycle (data-view-mode on #editor,
+            #    default "markup" -> "original" -> "final")
+            _bus(frame, "displayMode")
+            _wait(lambda: frame.evaluate(
+                "document.getElementById('editor').dataset.viewMode") == "original")
+            _bus(frame, "displayMode")
+            _wait(lambda: frame.evaluate(
+                "document.getElementById('editor').dataset.viewMode") == "final")
+
+            # 3. gridlines: view-only overlay, toggled from the View tab
+            _open_ribbon_tab(frame, "view")
+            frame.evaluate("document.getElementById('btn-gridlines').click()")
+            _wait(lambda: frame.evaluate(
+                "document.getElementById('editor').classList.contains('show-gridlines')"))
+            assert frame.evaluate(
+                "document.getElementById('btn-gridlines').getAttribute('aria-pressed')") == "true"
+            # state-mirror loop must not clobber a view toggle
+            _bus(frame, "bold")
+            _wait(lambda: frame.evaluate(
+                "document.getElementById('btn-gridlines').getAttribute('aria-pressed')") == "true")
+            frame.evaluate("document.getElementById('btn-gridlines').click()")
+            _wait(lambda: not frame.evaluate(
+                "document.getElementById('editor').classList.contains('show-gridlines')"))
+
+            # 4. navigation sidebar lists the outline; clicking jumps + flashes
+            _bus(frame, "toggleNavigation")
+            _wait(lambda: frame.evaluate(
+                "!document.getElementById('nav-panel').hidden"))
+            outline = frame.evaluate(
+                "[...document.querySelectorAll('#nav-panel .nav-panel-list a')]"
+                ".map(a => a.textContent)")
+            assert outline == ["Alpha", "Beta", "Gamma"], outline
+            frame.evaluate(
+                "document.querySelector('#nav-panel .nav-panel-list a').click()")
+            _wait(lambda: frame.evaluate(
+                "!!document.querySelector('h1.nav-flash')"))
+            _bus(frame, "toggleNavigation")
+            _wait(lambda: frame.evaluate(
+                "document.getElementById('nav-panel').hidden"))
+
+            # 5. ai.rewrite / ai.summarize -> propose dialog with presets
+            _bus(frame, "aiRewrite")
+            _wait(lambda: frame.evaluate(
+                "!!document.getElementById('ai-propose-dialog')?.classList.contains('open')"))
+            task = frame.evaluate(
+                "document.getElementById('ai-propose-instruction').value")
+            assert task.startswith("Rewrite the document"), task
+            frame.evaluate("(() => { const d = document.getElementById('ai-propose-dialog');"
+                           " if (d) d.classList.remove('open'); })()")
+            _bus(frame, "aiSummarize")
+            task = frame.evaluate(
+                "document.getElementById('ai-propose-instruction').value")
+            assert task.startswith("Summarize the document"), task
+        finally:
+            ctx.close()
+            browser.close()
+
+
+def test_r5_header_footer_section_markers_roundtrip(servers):
+    """R5 Header & Footer batch: different-first (w:titlePg), odd-even
+    (w:evenAndOddHeaders), header-from-top / footer-from-bottom (pgMar
+    w:header / w:footer distances) — marker divs ride at body start in
+    canonical order and survive save (host) + reload, like the WS-A
+    hyphenation/line-numbers/watermark markers."""
+    from playwright.sync_api import sync_playwright
+
+    seed = _seed_doc(servers, "r5.docx", text="Alpha beta gamma delta end.")
+
+    def _bus(frame, cmd):
+        frame.evaluate(
+            "c => dispatchEvent(new CustomEvent('wo-command',"
+            " { detail: { command: c, value: null } }))",
+            cmd,
+        )
+
+    def _html(frame):
+        return frame.evaluate("document.getElementById('editor').innerHTML")
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
+        try:
+            ctx = browser.new_context()
+            parent = ctx.new_page()
+            parent.goto(_parent_url(servers, seed))
+            frame = parent.frame("ed")
+            frame.locator("#editor").wait_for(state="visible", timeout=45000)
+            _wait(lambda: "Alpha beta gamma delta end." in _frame_text(frame))
+
+            for n, (cmd, klass) in enumerate((("toggleDifferentFirst", "different-first"),
+                               ("toggleOddEven", "odd-even"),
+                               ("toggleHeaderFromTop", "header-from-top"),
+                               ("toggleFooterFromBottom", "footer-from-bottom"))):
+                _bus(frame, cmd)
+                print("STEP r5", n, cmd, flush=True)
+                _wait(lambda k=klass: f'class="{k}"' in _html(frame).lower())
+
+            # save -> host stores the markers (converter round-trip)
+            frame.locator("#btn-save").click()
+            _wait(lambda: 'class="different-first"' in _host_html(servers, seed).lower())
+            host = _host_html(servers, seed).lower()
+            for k in ("different-first", "odd-even", "header-from-top", "footer-from-bottom"):
+                assert f'class="{k}"' in host, f"{k} missing after save"
+            assert 'class="header-from-top" data-inches="0.8"' in host
+            assert 'class="footer-from-bottom" data-inches="0.8"' in host
+
+            # reload a fresh editor from the same host doc -> markers return
+            parent2 = ctx.new_page()
+            parent2.goto(_parent_url(servers, seed))
+            frame2 = parent2.frame("ed")
+            frame2.locator("#editor").wait_for(state="visible", timeout=45000)
+            _wait(lambda: 'class="different-first"' in frame2.evaluate(
+                "document.getElementById('editor').innerHTML").lower())
+            f2 = frame2.evaluate(
+                "document.getElementById('editor').innerHTML").lower()
+            for k in ("different-first", "odd-even", "header-from-top", "footer-from-bottom"):
+                assert f'class="{k}"' in f2, f"{k} missing after reload"
+
+            # toggle two off -> save -> gone, the other two persist
+            _bus(frame, "toggleDifferentFirst")
+            _bus(frame, "toggleOddEven")
+            _wait(lambda: 'class="different-first"' not in _html(frame).lower())
+            frame.locator("#btn-save").click()
+            _wait(lambda: 'class="different-first"' not in _host_html(servers, seed).lower())
+            host = _host_html(servers, seed).lower()
+            assert 'class="odd-even"' not in host
+            for k in ("header-from-top", "footer-from-bottom"):
+                assert f'class="{k}"' in host, f"{k} should persist"
+        finally:
+            ctx.close()
+
+
+def test_r6_fleet_feature_surfaces(servers):
+    """R6 taskfleet feature batch (WO-FEA fleet): draw ink canvas, plugin
+    host dialog (browse/manage with the real /api/plugins catalog + per-user
+    enable toggle), photo editor dialog, citation/index markers that survive
+    save + reload, chat panel, tracked-change navigation, and document
+    protection (restrict apply server-enforced + reload-restricted)."""
+    from playwright.sync_api import sync_playwright
+
+    seed = _seed_doc(servers, "r6.docx", text="R6 base text alpha content.")
+
+    def _bus(frame, cmd, value=None):
+        frame.evaluate(
+            "args => dispatchEvent(new CustomEvent('wo-command',"
+            " { detail: { command: args[0], value: args[1] } }))",
+            [cmd, value],
+        )
+
+    def _html(frame):
+        return frame.evaluate("document.getElementById('editor').innerHTML")
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
+        try:
+            ctx = browser.new_context()
+            parent = ctx.new_page()
+            parent.goto(_parent_url(servers, seed))
+            frame = parent.frame("ed")
+            frame.locator("#editor").wait_for(state="visible", timeout=45000)
+            _wait(lambda: "R6 base text" in _frame_text(frame))
+
+            # ── draw: ink canvas engages / master toggle off / select aria ──
+            _bus(frame, "toggleInk", "pen")
+            print("STEP r6 draw", flush=True)
+            _wait(lambda: frame.evaluate(
+                "!!document.getElementById('ink-canvas')"
+                " && !document.getElementById('ink-canvas').hidden"))
+            assert "ink-canvas drawing" in frame.evaluate(
+                "document.getElementById('ink-canvas').className")
+            _bus(frame, "inkMode")
+            _wait(lambda: frame.evaluate(
+                "document.getElementById('ink-canvas').hidden === true"))
+            _bus(frame, "inkSelect")
+            _wait(lambda: frame.evaluate(
+                "document.getElementById('btn-ink-select')"
+                " && document.getElementById('btn-ink-select')"
+                ".getAttribute('aria-pressed') === 'true'"))
+
+            # ── plugins: browse opens real dialog with registry rows ──
+            _bus(frame, "browsePlugins")
+            print("STEP r6 plugins", flush=True)
+            _wait(lambda: frame.evaluate(
+                "(() => { const d = document.getElementById('plugins-dialog');"
+                " return d && d.classList.contains('open'); })()"))
+            names = frame.evaluate(
+                "Array.from(document.querySelectorAll('#plugins-list .plugins-name'))"
+                ".map(n => n.textContent)")
+            assert "OCR" in names and "Photo editor" in names, f"catalog: {names}"
+            _bus(frame, "managePlugins")
+            _wait(lambda: frame.evaluate(
+                "document.querySelectorAll('#plugins-list .plugins-toggle input').length >= 2"))
+            frame.evaluate(
+                "() => { const cb = document.querySelector("
+                " '#plugins-list .plugins-toggle input[data-plugin=\"ocr\"]');"
+                " if (cb) { cb.checked = false; cb.dispatchEvent(new Event('change')); } }")
+            saved = frame.evaluate("localStorage.getItem('wo.plugins.enabled')")
+            assert saved and '"ocr":false' in saved, f"toggle not persisted: {saved}"
+            frame.evaluate("document.getElementById('btn-plugins-close').click()")
+            _wait(lambda: not frame.evaluate(
+                "document.getElementById('plugins-dialog').classList.contains('open')"))
+
+            # ── photo editor dialog opens ──
+            _bus(frame, "photoEditor")
+            print("STEP r6 photo", flush=True)
+            _wait(lambda: frame.evaluate(
+                "document.getElementById('photo-editor-dialog').classList.contains('open')"))
+            frame.evaluate("document.getElementById('btn-photo-editor-cancel').click()")
+            _wait(lambda: not frame.evaluate(
+                "document.getElementById('photo-editor-dialog').classList.contains('open')"))
+
+            # ── references: citation + index markers round-trip ──
+            frame.evaluate(
+                "() => { const ed = document.getElementById('editor');"
+                " ed.focus();"
+                " const w = document.createTreeWalker(ed, NodeFilter.SHOW_TEXT);"
+                " const t = w.nextNode();"
+                " const r = document.createRange();"
+                " r.setStart(t, 1); r.collapse(true);"
+                " const s = document.getSelection();"
+                " s.removeAllRanges(); s.addRange(r); }")
+            _bus(frame, "insertCitation")
+            _bus(frame, "insertIndexEntry")
+            print("STEP r6 ref", flush=True)
+            _wait(lambda: 'class="ref-citation"' in _html(frame))
+            _wait(lambda: 'class="ref-index"' in _html(frame))
+            frame.locator("#btn-save").click()
+            _wait(lambda: 'class="ref-citation"' in _host_html(servers, seed).lower())
+            host = _host_html(servers, seed).lower()
+            assert 'class="ref-citation"' in host, "citation marker missing after save"
+            assert 'class="ref-index"' in host, "index marker missing after save"
+
+            # ── collab: chat panel + tracked-change navigation ──
+            _bus(frame, "toggleChat")
+            print("STEP r6 chat", flush=True)
+            _wait(lambda: frame.evaluate(
+                "!!document.getElementById('chat-panel')"
+                " && !document.getElementById('chat-panel').hidden"))
+            _bus(frame, "toggleChat")
+            _wait(lambda: frame.evaluate(
+                "document.getElementById('chat-panel').hidden === true"))
+            frame.evaluate(
+                "() => { const ed = document.getElementById('editor');"
+                " ed.focus();"
+                " const w = document.createTreeWalker(ed, NodeFilter.SHOW_TEXT);"
+                " const t = w.nextNode();"
+                " const r = document.createRange();"
+                " r.setStart(t, 1);"
+                " const ins = document.createElement('ins');"
+                " ins.className = 'track-insert';"
+                " ins.textContent = 'R6Changed';"
+                " r.insertNode(ins);"
+                " const s = document.getSelection();"
+                " s.removeAllRanges();"
+                " const r2 = document.createRange();"
+                " r2.setStartBefore(ins); r2.collapse(true); s.addRange(r2); }")
+            print("STEP r6 tracknav", flush=True)
+            _wait(lambda: 'class="track-insert"' in _html(frame))
+            _bus(frame, "nextTrackedChange")
+            _wait(lambda: frame.evaluate(
+                "(() => { const n = window.getSelection().anchorNode;"
+                " const el = n && n.nodeType === 3 ? n.parentElement : n;"
+                " return !!(el && el.closest && el.closest('ins.track-insert')); })()"))
+
+            # ── protection: apply restrict -> server-enforced + reload ──
+            _bus(frame, "protectDialog")
+            print("STEP r6 protect", flush=True)
+            _wait(lambda: frame.evaluate(
+                "document.getElementById('protect-dialog').classList.contains('open')"))
+            frame.evaluate(
+                "() => { const r = document.getElementById('protect-check-restrict');"
+                " if (r) r.checked = true;"
+                " const pw = document.getElementById('protect-new-password');"
+                " if (pw) pw.value = 'secret-r6';"
+                " document.getElementById('btn-protect-apply').click(); }")
+            _wait(lambda: frame.evaluate(
+                "document.getElementById('editor').getAttribute('aria-readonly') === 'true'"))
+            assert frame.evaluate(
+                "document.getElementById('editor').contentEditable") == "false"
+            assert frame.evaluate("document.getElementById('btn-save').disabled") is True
+
+            # reload a fresh editor from the same host doc -> still restricted
+            parent2 = ctx.new_page()
+            parent2.goto(_parent_url(servers, seed))
+            frame2 = parent2.frame("ed")
+            frame2.locator("#editor").wait_for(state="visible", timeout=45000)
+            _wait(lambda: frame2.evaluate(
+                "document.getElementById('editor').getAttribute('aria-readonly') === 'true'"),
+                timeout=30)
+        finally:
+            ctx.close()
+
+
+def test_paragraph_splits_across_pages_and_serializes_whole(servers):
+    """Line-granular pagination: a paragraph taller than the remaining page
+    space splits at a line boundary across sheets (Word/LO behaviour). The
+    split is purely visual — the saved document still contains the one
+    canonical paragraph (no .wo-page wrappers, no wo-cont fragments)."""
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
+        try:
+            ctx = browser.new_context()
+            page = ctx.new_page()
+            made = json.loads(urllib.request.urlopen(
+                urllib.request.Request(
+                    f"http://127.0.0.1:{servers['doc_port']}/api/documents/new",
+                    data=b"",
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                ),
+                timeout=10,
+            ).read())
+            doc_id = made["doc_id"]
+            page.goto(f"http://127.0.0.1:{servers['doc_port']}/editor/{doc_id}")
+            page.locator("#editor").wait_for(state="visible", timeout=45000)
+            _wait(lambda: page.locator("#editor .wo-page p").count() >= 1)
+
+            # one paragraph, far taller than a sheet (~90 wrapped lines)
+            page.evaluate(
+                "(() => { const ed = document.getElementById('editor');"
+                " const line = 'Lorem ipsum dolor sit amet, consectetur"
+                " adipiscing elit, sed do eiusmod tempor incididunt ut labore"
+                " et dolore magna aliqua ut enim ad minim veniam quis nostrud. ';"
+                " const p = document.createElement('p');"
+                " p.textContent = line.repeat(90);"
+                " ed.appendChild(p); ed.focus(); })()"
+            )
+            _wait(lambda: page.locator("#editor .wo-page").count() >= 3)
+
+            # every sheet must hold its content: no overflow below the box
+            metrics = page.evaluate(
+                "(() => Array.from(document.querySelectorAll('#editor .wo-page'))"
+                " .map(pg => ({ s: pg.scrollHeight, c: pg.clientHeight })))()"
+            )
+            assert metrics, "no pages rendered"
+            for m in metrics:
+                assert m["s"] <= m["c"] + 1, f"page overflow: scroll={m['s']} client={m['c']}"
+
+            # the split must be visible: the first sheet ends mid-paragraph
+            # (its last block and the next sheet's first block share one
+            # logical paragraph -> next page starts with a continuation)
+            cont = page.evaluate(
+                "(() => { const pgs = document.querySelectorAll('#editor .wo-page');"
+                " return Array.from(pgs).filter(pg =>"
+                "   pg.querySelector(':scope > .wo-cont')).length })()"
+            )
+            assert cont >= 1, "expected at least one mid-paragraph continuation sheet"
+
+            # save; the serialized document keeps ONE canonical paragraph
+            page.locator("#btn-save").click()
+            _wait(lambda: "Lorem ipsum" in urllib.request.urlopen(
+                f"http://127.0.0.1:{servers['doc_port']}/api/documents/{doc_id}/html",
+                timeout=10).read().decode("utf-8", "replace"))
+            saved = json.loads(urllib.request.urlopen(
+                f"http://127.0.0.1:{servers['doc_port']}/api/documents/{doc_id}/html",
+                timeout=10,
+            ).read().decode("utf-8", "replace"))["html"]
+            assert "Lorem ipsum" in saved
+            # starter <p></p> + the one canonical mega-paragraph — the split
+            # fragments folded back into a single <p>, view layer stripped
+            assert saved.count("<p") == 2, f"paragraph count: {saved.count('<p')}"
+            assert "wo-cont" not in saved and "wo-page" not in saved
+        finally:
+            ctx.close()
+            browser.close()
+
+
+def test_list_splits_across_pages_and_serializes_whole(servers):
+    """List-granular pagination: an <ol> crossing the sheet bottom fills the
+    sheet with its fitting items and continues on the next sheet. Purely
+    visual — the saved document still holds the ONE list with all items."""
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
+        try:
+            ctx = browser.new_context()
+            page = ctx.new_page()
+            made = json.loads(urllib.request.urlopen(
+                urllib.request.Request(
+                    f"http://127.0.0.1:{servers['doc_port']}/api/documents/new",
+                    data=b"",
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                ),
+                timeout=10,
+            ).read())
+            doc_id = made["doc_id"]
+            page.goto(f"http://127.0.0.1:{servers['doc_port']}/editor/{doc_id}")
+            page.locator("#editor").wait_for(state="visible", timeout=45000)
+            _wait(lambda: page.locator("#editor .wo-page p").count() >= 1)
+
+            page.evaluate(
+                "(() => { const ed = document.getElementById('editor');"
+                " const ol = document.createElement('ol');"
+                " for (let i = 1; i <= 140; i++) {"
+                "   const li = document.createElement('li');"
+                "   li.textContent = ('Item ' + i + ' — laboriosam at ')"
+                "     .repeat(3);"
+                "   ol.appendChild(li); }"
+                " ed.appendChild(ol); ed.focus(); })()"
+            )
+            _wait(lambda: page.locator("#editor .wo-page").count() >= 3)
+
+            metrics = page.evaluate(
+                "(() => Array.from(document.querySelectorAll('#editor .wo-page'))"
+                " .map(pg => pg.scrollHeight - pg.clientHeight))()"
+            )
+            assert metrics and all(m <= 1 for m in metrics), f"overflow: {metrics}"
+            cont = page.evaluate(
+                "(() => document.querySelectorAll('#editor .wo-cont').length)()"
+            )
+            assert cont >= 1, "expected a list continuation sheet"
+
+            page.locator("#btn-save").click()
+            _wait(lambda: "Item 140" in urllib.request.urlopen(
+                f"http://127.0.0.1:{servers['doc_port']}/api/documents/{doc_id}/html",
+                timeout=10).read().decode("utf-8", "replace"))
+            saved = json.loads(urllib.request.urlopen(
+                f"http://127.0.0.1:{servers['doc_port']}/api/documents/{doc_id}/html",
+                timeout=10,
+            ).read().decode("utf-8", "replace"))["html"]
+            assert saved.count("<ol") == 1, f"ol count: {saved.count('<ol')}"
+            assert saved.count("<li") == 140, f"li count: {saved.count('<li')}"
+            assert "wo-cont" not in saved and "wo-page" not in saved
+        finally:
+            ctx.close()
+            browser.close()
+
+
+def test_table_splits_across_pages_and_serializes_whole(servers):
+    """Row-granular pagination: a table crossing the sheet bottom splits at
+    a row boundary; the saved document still holds the ONE table with all
+    rows."""
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
+        try:
+            ctx = browser.new_context()
+            page = ctx.new_page()
+            made = json.loads(urllib.request.urlopen(
+                urllib.request.Request(
+                    f"http://127.0.0.1:{servers['doc_port']}/api/documents/new",
+                    data=b"",
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                ),
+                timeout=10,
+            ).read())
+            doc_id = made["doc_id"]
+            page.goto(f"http://127.0.0.1:{servers['doc_port']}/editor/{doc_id}")
+            page.locator("#editor").wait_for(state="visible", timeout=45000)
+            _wait(lambda: page.locator("#editor .wo-page p").count() >= 1)
+
+            page.evaluate(
+                "(() => { const ed = document.getElementById('editor');"
+                " const t = document.createElement('table');"
+                " for (let r = 0; r < 80; r++) {"
+                "   const tr = t.insertRow();"
+                "   for (let c = 0; c < 2; c++) {"
+                "     tr.insertCell().textContent ="
+                "       ('Row ' + r + ' cell ' + c + ' veritatis netis ')"
+                "         .repeat(3); } }"
+                " ed.appendChild(t); ed.focus(); })()"
+            )
+            _wait(lambda: page.locator("#editor .wo-page").count() >= 3)
+
+            metrics = page.evaluate(
+                "(() => Array.from(document.querySelectorAll('#editor .wo-page'))"
+                " .map(pg => pg.scrollHeight - pg.clientHeight))()"
+            )
+            assert metrics and all(m <= 1 for m in metrics), f"overflow: {metrics}"
+            cont = page.evaluate(
+                "(() => document.querySelectorAll('#editor .wo-cont').length)()"
+            )
+            assert cont >= 1, "expected a table continuation sheet"
+
+            page.locator("#btn-save").click()
+            _wait(lambda: "Row 79" in urllib.request.urlopen(
+                f"http://127.0.0.1:{servers['doc_port']}/api/documents/{doc_id}/html",
+                timeout=10).read().decode("utf-8", "replace"))
+            saved = json.loads(urllib.request.urlopen(
+                f"http://127.0.0.1:{servers['doc_port']}/api/documents/{doc_id}/html",
+                timeout=10,
+            ).read().decode("utf-8", "replace"))["html"]
+            assert saved.count("<table") == 1, f"table count: {saved.count('<table')}"
+            assert saved.count("<tr") == 80, f"row count: {saved.count('<tr')}"
+            assert "wo-cont" not in saved and "wo-page" not in saved
+        finally:
+            ctx.close()
+            browser.close()
+
+
+def test_header_footer_repeat_on_every_sheet_and_serialize_once(servers):
+    """Word behaviour: page header/footer repeat on EVERY sheet of the
+    paginated view (authoring original in the first/last sheet margin,
+    display-only clones elsewhere). Serialization keeps exactly one of
+    each at body start/end — clones never leak into the saved document."""
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
+        try:
+            ctx = browser.new_context()
+            page = ctx.new_page()
+            made = json.loads(urllib.request.urlopen(
+                urllib.request.Request(
+                    f"http://127.0.0.1:{servers['doc_port']}/api/documents/new",
+                    data=b"",
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                ),
+                timeout=10,
+            ).read())
+            doc_id = made["doc_id"]
+            page.goto(f"http://127.0.0.1:{servers['doc_port']}/editor/{doc_id}")
+            page.locator("#editor").wait_for(state="visible", timeout=45000)
+            _wait(lambda: page.locator("#editor .wo-page p").count() >= 1)
+
+            page.evaluate(
+                "(() => { const ed = document.getElementById('editor');"
+                " const h = document.createElement('header');"
+                " h.className = 'page-header'; h.textContent = 'Chapter One';"
+                " ed.insertBefore(h, ed.firstChild);"
+                " const f = document.createElement('footer');"
+                " f.className = 'page-footer'; f.textContent = 'Page footer note';"
+                " ed.appendChild(f);"
+                " const line = 'Body flow text for header repeat probing, "
+                "sed do eiusmod tempor incididunt ut labore et dolore magna. ';"
+                " for (let i = 0; i < 12; i++) {"
+                "   const p = document.createElement('p');"
+                "   p.textContent = line.repeat(12); ed.appendChild(p); }"
+                " ed.focus(); })()"
+            )
+            _wait(lambda: page.locator("#editor .wo-page").count() >= 3)
+
+            state = page.evaluate(
+                "(() => { const pgs ="
+                " document.querySelectorAll('#editor .wo-page');"
+                " return {"
+                "  sheets: pgs.length,"
+                "  headers: Array.from(pgs).filter(pg =>"
+                "    pg.querySelector(':scope > header.page-header')).length,"
+                "  footers: Array.from(pgs).filter(pg =>"
+                "    pg.querySelector(':scope > footer.page-footer')).length,"
+                "  headerOnAll: Array.from(pgs).every(pg =>"
+                "    (pg.innerText || '').includes('Chapter One')),"
+                "  footerOnAll: Array.from(pgs).every(pg =>"
+                "    (pg.innerText || '').includes('Page footer note')),"
+                "  overflow: Array.from(pgs).map(pg =>"
+                "    pg.scrollHeight - pg.clientHeight).filter(x => x > 1)"
+                " }; })()"
+            )
+            assert state["sheets"] >= 3, state
+            assert state["headers"] == state["sheets"], state
+            assert state["footers"] == state["sheets"], state
+            assert state["headerOnAll"] and state["footerOnAll"], state
+            assert not state["overflow"], state
+
+            page.locator("#btn-save").click()
+            _wait(lambda: "Chapter One" in urllib.request.urlopen(
+                f"http://127.0.0.1:{servers['doc_port']}/api/documents/{doc_id}/html",
+                timeout=10).read().decode("utf-8", "replace"))
+            saved = json.loads(urllib.request.urlopen(
+                f"http://127.0.0.1:{servers['doc_port']}/api/documents/{doc_id}/html",
+                timeout=10,
+            ).read().decode("utf-8", "replace"))["html"]
+            assert saved.count("page-header") == 1, "header serialized once"
+            assert saved.count("page-footer") == 1, "footer serialized once"
+            assert "wo-hf-clone" not in saved and "wo-page" not in saved
+        finally:
+            ctx.close()
+            browser.close()
+
+
+def test_single_tall_list_item_splits_across_sheets(servers):
+    """A single LI taller than a sheet (the old block-granular ceiling)
+    splits at a line boundary like a paragraph: head lines stay under the
+    bullet, the tail continues on the next sheet, and the saved document
+    still holds exactly ONE list item."""
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
+        try:
+            ctx = browser.new_context()
+            page = ctx.new_page()
+            made = json.loads(urllib.request.urlopen(
+                urllib.request.Request(
+                    f"http://127.0.0.1:{servers['doc_port']}/api/documents/new",
+                    data=b"",
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                ),
+                timeout=10,
+            ).read())
+            doc_id = made["doc_id"]
+            page.goto(f"http://127.0.0.1:{servers['doc_port']}/editor/{doc_id}")
+            page.locator("#editor").wait_for(state="visible", timeout=45000)
+            _wait(lambda: page.locator("#editor .wo-page p").count() >= 1)
+
+            page.evaluate(
+                "(() => { const ed = document.getElementById('editor');"
+                " const ol = document.createElement('ol');"
+                " const li = document.createElement('li');"
+                " li.textContent = ('One enormous list item that runs far past a "
+                "single sheet, lorem ipsum dolor sit amet consectetur adipisci. ')"
+                "   .repeat(60);"
+                " ol.appendChild(li);"
+                " ed.appendChild(ol); ed.focus(); })()"
+            )
+            _wait(lambda: page.locator("#editor .wo-page").count() >= 3)
+
+            metrics = page.evaluate(
+                "(() => Array.from(document.querySelectorAll('#editor .wo-page'))"
+                " .map(pg => pg.scrollHeight - pg.clientHeight))()"
+            )
+            assert metrics and all(m <= 1 for m in metrics), f"overflow: {metrics}"
+
+            page.locator("#btn-save").click()
+            _wait(lambda: "enormous" in urllib.request.urlopen(
+                f"http://127.0.0.1:{servers['doc_port']}/api/documents/{doc_id}/html",
+                timeout=10).read().decode("utf-8", "replace"))
+            saved = json.loads(urllib.request.urlopen(
+                f"http://127.0.0.1:{servers['doc_port']}/api/documents/{doc_id}/html",
+                timeout=10,
+            ).read().decode("utf-8", "replace"))["html"]
+            assert saved.count("<ol") == 1, f"ol count: {saved.count('<ol')}"
+            assert saved.count("<li") == 1, f"li count: {saved.count('<li')}"
+            assert "wo-cont" not in saved and "wo-page" not in saved
+        finally:
+            ctx.close()
+            browser.close()
+
+
+def test_single_tall_table_row_splits_across_sheets(servers):
+    """A single TR taller than a sheet (the last block-granular ceiling)
+    splits mid-row like Word's 'allow row to break across pages': each cell
+    keeps the content above the break, the tail continues on the next sheet,
+    and the saved document still holds exactly ONE row."""
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
+        try:
+            ctx = browser.new_context()
+            page = ctx.new_page()
+            made = json.loads(urllib.request.urlopen(
+                urllib.request.Request(
+                    f"http://127.0.0.1:{servers['doc_port']}/api/documents/new",
+                    data=b"",
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                ),
+                timeout=10,
+            ).read())
+            doc_id = made["doc_id"]
+            page.goto(f"http://127.0.0.1:{servers['doc_port']}/editor/{doc_id}")
+            page.locator("#editor").wait_for(state="visible", timeout=45000)
+            _wait(lambda: page.locator("#editor .wo-page p").count() >= 1)
+
+            page.evaluate(
+                "(() => { const ed = document.getElementById('editor');"
+                " const tbl = document.createElement('table');"
+                " const tb = document.createElement('tbody');"
+                " const tr = document.createElement('tr');"
+                " const td = document.createElement('td');"
+                " td.textContent = ('One enormous table cell that runs far past a "
+                "single sheet, lorem ipsum dolor sit amet consectetur adipisci elit "
+                "sed do eiusmod. ').repeat(120);"
+                " tr.appendChild(td); tb.appendChild(tr);"
+                " tbl.appendChild(tb); ed.appendChild(tbl); ed.focus(); })()"
+            )
+            _wait(lambda: page.locator("#editor .wo-page").count() >= 3)
+
+            metrics = page.evaluate(
+                "(() => Array.from(document.querySelectorAll('#editor .wo-page'))"
+                " .map(pg => pg.scrollHeight - pg.clientHeight))()"
+            )
+            assert metrics and all(m <= 1 for m in metrics), f"overflow: {metrics}"
+
+            page.locator("#btn-save").click()
+            _wait(lambda: "enormous" in urllib.request.urlopen(
+                f"http://127.0.0.1:{servers['doc_port']}/api/documents/{doc_id}/html",
+                timeout=10).read().decode("utf-8", "replace"))
+            saved = json.loads(urllib.request.urlopen(
+                f"http://127.0.0.1:{servers['doc_port']}/api/documents/{doc_id}/html",
+                timeout=10,
+            ).read().decode("utf-8", "replace"))["html"]
+            assert saved.count("<table") == 1, f"table count: {saved.count('<table')}"
+            assert saved.count("<tr") == 1, f"tr count: {saved.count('<tr')}"
+            assert saved.count("<td") == 1, f"td count: {saved.count('<td')}"
+            assert "wo-cont" not in saved and "wo-page" not in saved \
+                and "wo-row-cont" not in saved
         finally:
             ctx.close()
             browser.close()

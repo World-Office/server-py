@@ -171,6 +171,8 @@ def _base_args(tool: str, doc_id: str) -> dict:
     args: dict = {"doc_id": doc_id}
     if tool == "apply_ops":
         args.update({"client_id": "agent=fuzz", "ops": []})
+    elif tool == "search_doc":
+        args["query"] = "fuzz"
     elif tool == "lock":
         args["action"] = "get"
     elif tool == "presence":
@@ -242,7 +244,7 @@ def test_mcp_tools_call_surface_never_crashes_on_hostile_arguments(tmp_path, arg
 )
 @given(doc_id=_DOC_ID)
 def test_hostile_doc_ids_are_typed_bad_request_on_every_tool(tmp_path, doc_id):
-    """Pins the doc-id contract for all five tools: invalid ids (traversal,
+    """Pins the doc-id contract for every tool in the catalog: invalid ids (traversal,
     separators, control chars, over-long) are rejected with the same typed
     400 bad_request the WOPI surface uses, valid-but-unknown ids are the
     standard 404 (except presence, which never queries the store). A

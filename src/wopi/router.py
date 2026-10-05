@@ -16,10 +16,11 @@ Endpoints (per WOPI spec):
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, Response
 
 from ..lib.store import DocumentStore
+from .auth import require_auth
 from .protocol import (
     LOCK_HEADER,
     WopiError,
@@ -28,7 +29,21 @@ from .protocol import (
     lock_mismatch_error,
 )
 
-router = APIRouter()
+def _wopi_auth_gate(request: Request) -> None:
+    """Enforce WOPI token validation on the host routes when configured.
+
+    WOPI 1.0 requires the host to verify the access_token. This server's
+    host mode serves only its local SQLite store (same-network trust), so
+    enforcement is off by default; set ``require_wopi_auth`` (or
+    DOCSERVER_REQUIRE_WOPI_AUTH) to validate every /wopi/* call. Failures
+    surface as HTTP 401 via the global WopiError handler.
+    """
+    cfg = getattr(request.app.state, "config", None)
+    if cfg and getattr(cfg, "require_wopi_auth", False):
+        require_auth(request, cfg.jwt_secret or "change-me-32-chars-minimum")
+
+
+router = APIRouter(dependencies=[Depends(_wopi_auth_gate)])
 
 # Content types by extension (kept deliberately small).
 CONTENT_TYPES = {

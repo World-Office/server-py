@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>World Office — Agents</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { font-family: system-ui, sans-serif; margin: 2rem auto; max-width: 60rem; padding: 0 1rem; }
+    h1 { font-size: 1.3rem; } h2 { font-size: 1.05rem; margin-top: 2rem; }
+    table { border-collapse: collapse; width: 100%; margin-top: .5rem; }
+    th, td { border: 1px solid #8884; padding: .35rem .6rem; text-align: left; font-size: .85rem; }
+    th { opacity: .7; font-weight: 600; }
+    td.num { text-align: right; font-variant-numeric: tabular-nums; }
+    .empty { opacity: .6; font-style: italic; }
+    code { font-size: .8rem; }
+  </style>
+</head>
+<body>
+  <h1>Agents — observability</h1>
+  <p class="empty">Read-only audit view: who ran, when, with what budget and outcome.</p>
+
+  <h2>Per-agent aggregates</h2>
+  {% if summary %}
+  <table>
+    <thead><tr><th>client</th><th class="num">runs</th><th class="num">ops</th><th class="num">docs</th><th>last seen</th></tr></thead>
+    <tbody>
+    {% for a in summary %}
+      <tr><td><code>{{ a.client_id }}</code></td><td class="num">{{ a.runs }}</td><td class="num">{{ a.ops }}</td><td class="num">{{ a.docs }}</td><td>{{ a.last_ts }}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}<p class="empty">No agent runs recorded yet.</p>{% endif %}
+
+  <h2>Recent runs (newest first)</h2>
+  {% if runs %}
+  <table>
+    <thead><tr><th class="num">#</th><th>client</th><th>doc</th><th>task</th><th class="num">steps</th><th class="num">ops</th><th class="num">rev</th><th>stop</th></tr></thead>
+    <tbody>
+    {% for r in runs %}
+      <tr><td class="num">{{ r.id }}</td><td><code>{{ r.client_id }}</code></td><td><code>{{ r.doc_id }}</code></td><td>{{ r.task }}</td><td class="num">{{ r.steps }}</td><td class="num">{{ r.ops }}</td><td class="num">{{ r.rev }}</td><td>{{ r.stopped_reason }}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}<p class="empty">Nothing here yet.</p>{% endif %}
+</body>
+</html>
